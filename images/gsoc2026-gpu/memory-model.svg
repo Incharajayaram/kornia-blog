@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 600" width="900" height="600" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6b7280"/>
+    </marker>
+    <style>
+      .box { rx:8; ry:8; stroke-width:1.5; }
+      .t   { font-size:15px; font-weight:600; fill:#1a1a19; }
+      .s   { font-size:12px; fill:#4b5563; }
+      .m   { font-size:11.5px; fill:#4b5563; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+      .mb  { font-size:12px; font-weight:600; fill:#1a1a19; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+      .hdr { font-size:11.5px; font-weight:700; fill:#6b7280; letter-spacing:.06em; }
+      .lbl { font-size:11.5px; fill:#6b7280; font-style:italic; }
+    </style>
+  </defs>
+
+  <rect width="900" height="600" fill="#fcfcfb"/>
+  <text x="28" y="34" class="t" font-size="17">kornia-rs tensor memory model</text>
+  <text x="28" y="54" class="s">One owning resource per allocation. Where the bytes live is a runtime property, checked before host access.</text>
+
+  <rect x="28" y="76" width="844" height="56" class="box" fill="#eaf2fd" stroke="#2a78d6"/>
+  <text x="44" y="100" class="mb" font-size="14">Tensor&lt;T, N&gt;</text>
+  <text x="44" y="120" class="m">shape · strides · storage</text>
+
+  <path d="M450,132 L450,156" stroke="#6b7280" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <rect x="28" y="156" width="844" height="60" class="box" fill="#eaf2fd" stroke="#2a78d6"/>
+  <text x="44" y="180" class="mb" font-size="14">TensorStorage&lt;T&gt;</text>
+  <text x="44" y="200" class="m">ptr · len · owner: Box&lt;dyn MemoryResource&gt; · alloc: AllocHandle</text>
+  <text x="858" y="200" class="lbl" text-anchor="end">as_slice() asserts domain.is_host_accessible()</text>
+
+  <path d="M180,216 L180,258" stroke="#6b7280" stroke-width="1.5" marker-end="url(#a)"/>
+  <path d="M450,216 L450,258" stroke="#6b7280" stroke-width="1.5" marker-end="url(#a)"/>
+  <path d="M730,216 L730,258" stroke="#6b7280" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <text x="28" y="248" class="hdr">MEMORYRESOURCE IMPLEMENTORS</text>
+
+  <!-- host -->
+  <rect x="28" y="258" width="252" height="92" class="box" fill="#f3f4f6" stroke="#9ca3af"/>
+  <text x="44" y="282" class="mb">HostResource</text>
+  <text x="44" y="302" class="s">std::alloc — ordinary heap</text>
+  <text x="44" y="330" class="s">domain → <tspan class="m">Host</tspan></text>
+
+  <!-- pinned -->
+  <rect x="300" y="258" width="252" height="92" class="box" fill="#fdf0e9" stroke="#eb6834"/>
+  <text x="316" y="282" class="mb">PinnedResource</text>
+  <text x="316" y="302" class="s">cuMemHostAlloc — page-locked,</text>
+  <text x="316" y="318" class="s">DMA-fast H2D / D2H</text>
+  <text x="316" y="340" class="s">domain → <tspan class="m">Host</tspan></text>
+
+  <!-- cuda -->
+  <rect x="572" y="258" width="300" height="92" class="box" fill="#e8f7f1" stroke="#1baf7a"/>
+  <text x="588" y="282" class="mb">CudaResource&lt;T&gt;</text>
+  <text x="588" y="302" class="m">ManuallyDrop&lt;CudaSlice&lt;T&gt;&gt;</text>
+  <text x="588" y="320" class="m">stream · id · backing</text>
+  <text x="588" y="341" class="s">sole owner of the device allocation</text>
+
+  <path d="M722,350 L722,388" stroke="#6b7280" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- backing -->
+  <rect x="464" y="388" width="408" height="150" class="box" fill="#fcfcfb" stroke="#1baf7a" stroke-dasharray="4 3"/>
+  <text x="480" y="410" class="hdr">enum Backing — ONE TYPE, THREE DROP STRATEGIES</text>
+
+  <rect x="480" y="422" width="376" height="34" class="box" fill="#e8f7f1" stroke="#1baf7a" stroke-width="1"/>
+  <text x="494" y="437" class="mb" font-size="11.5">Device</text>
+  <text x="494" y="450" class="s" font-size="11">cudarc owns it; CudaSlice::drop frees → <tspan class="m" font-size="10.5">Device { id }</tspan></text>
+
+  <rect x="480" y="460" width="376" height="34" class="box" fill="#e8f7f1" stroke="#1baf7a" stroke-width="1"/>
+  <text x="494" y="475" class="mb" font-size="11.5">Managed</text>
+  <text x="494" y="488" class="s" font-size="11">cuMemAllocManaged; host-dereferenceable → <tspan class="m" font-size="10.5">Unified { id }</tspan></text>
+
+  <rect x="480" y="498" width="376" height="34" class="box" fill="#e8f7f1" stroke="#1baf7a" stroke-width="1"/>
+  <text x="494" y="513" class="mb" font-size="11.5">Foreign(keepalive)</text>
+  <text x="494" y="526" class="s" font-size="11">external producer (DLPack); alias leaked → <tspan class="m" font-size="10.5">Device { id }</tspan></text>
+
+  <!-- allocators -->
+  <text x="28" y="382" class="hdr">ALLOCATORS</text>
+  <rect x="28" y="392" width="408" height="146" class="box" fill="#fcfcfb" stroke="#d1d5db"/>
+  <text x="44" y="416" class="m">CpuAllocator</text>
+  <text x="250" y="416" class="s">→ HostResource</text>
+  <text x="44" y="440" class="m">PinnedAllocator</text>
+  <text x="250" y="440" class="s">→ PinnedResource</text>
+  <text x="44" y="464" class="m">PinnedWcAllocator</text>
+  <text x="250" y="464" class="s">→ PinnedResource (write-combined)</text>
+  <text x="44" y="488" class="m">CudaAllocator</text>
+  <text x="250" y="488" class="s">→ CudaResource / Device</text>
+  <text x="44" y="512" class="m">CudaUnifiedAllocator</text>
+  <text x="250" y="512" class="s">→ CudaResource / Managed</text>
+
+  <text x="28" y="568" class="s">Domain drives dispatch: <tspan class="m">Host</tspan> and <tspan class="m">Unified</tspan> are host-accessible and take the CPU path; <tspan class="m">Device</tspan> launches a kernel.</text>
+  <text x="28" y="586" class="s">A tensor can also wrap memory it does not own — <tspan class="m">from_cudaslice</tspan> / <tspan class="m">from_foreign_cudaslice</tspan> — with no host round-trip.</text>
+</svg>

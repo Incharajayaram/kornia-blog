@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 660" width="900" height="660" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6b7280"/>
+    </marker>
+    <style>
+      .box   { rx:8; ry:8; stroke-width:1.5; }
+      .t     { font-size:15px; font-weight:600; fill:#1a1a19; }
+      .s     { font-size:12px; fill:#4b5563; }
+      .m     { font-size:11.5px; fill:#4b5563; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+      .lbl   { font-size:11.5px; fill:#6b7280; font-style:italic; }
+      .hdr   { font-size:12px; font-weight:700; fill:#6b7280; letter-spacing:.06em; }
+    </style>
+  </defs>
+
+  <rect width="900" height="660" fill="#fcfcfb"/>
+  <text x="28" y="34" class="t" font-size="17">kornia-rs CUDA backend</text>
+  <text x="28" y="54" class="s">Kernels are CUDA C strings compiled at runtime; the target architecture is discovered from the device.</text>
+
+  <!-- user API -->
+  <rect x="28" y="76" width="844" height="58" class="box" fill="#eaf2fd" stroke="#2a78d6"/>
+  <text x="44" y="100" class="t">Public API — kornia-imgproc</text>
+  <text x="44" y="120" class="m">resize · warp_affine · warp_perspective · remap · color conversions</text>
+  <text x="858" y="120" class="lbl" text-anchor="end">unchanged for CPU callers</text>
+
+  <path d="M450,134 L450,158" stroke="#6b7280" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- dispatch -->
+  <rect x="28" y="158" width="844" height="76" class="box" fill="#fdf0e9" stroke="#eb6834"/>
+  <text x="44" y="182" class="t">Residency dispatch — <tspan class="m" font-size="13">pair_residency</tspan></text>
+  <text x="44" y="203" class="s">Reads <tspan class="m">MemoryDomain</tspan> of the (src, dst) pair. No implicit transfer in either direction.</text>
+  <text x="44" y="222" class="m">Host → CPU path   ·   Device → CUDA kernel   ·   mixed pair → typed error</text>
+
+  <path d="M240,234 L240,262" stroke="#6b7280" stroke-width="1.5" marker-end="url(#a)"/>
+  <path d="M660,234 L660,262" stroke="#6b7280" stroke-width="1.5" marker-end="url(#a)"/>
+  <text x="252" y="252" class="lbl">host</text>
+  <text x="672" y="252" class="lbl">device</text>
+
+  <!-- CPU path -->
+  <rect x="28" y="262" width="404" height="60" class="box" fill="#f3f4f6" stroke="#9ca3af"/>
+  <text x="44" y="286" class="t">CPU path</text>
+  <text x="44" y="306" class="s">existing SIMD / Rayon implementation</text>
+
+  <!-- GPU column -->
+  <text x="464" y="256" class="hdr">FIRST CALL ONLY</text>
+  <rect x="464" y="262" width="192" height="60" class="box" fill="#e8f7f1" stroke="#1baf7a"/>
+  <text x="480" y="286" class="t">NVRTC</text>
+  <text x="480" y="306" class="s">CUDA C → PTX</text>
+
+  <rect x="680" y="262" width="192" height="60" class="box" fill="#e8f7f1" stroke="#1baf7a"/>
+  <text x="696" y="284" class="t">Kernel cache</text>
+  <text x="696" y="304" class="m" font-size="10.5">OnceLock&lt;CudaKernel&gt;</text>
+  <path d="M656,292 L676,292" stroke="#6b7280" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <text x="464" y="346" class="s">arch <tspan class="m">compute_XY</tspan> detected once per device</text>
+  <text x="464" y="364" class="s">and memoised — one build runs on any GPU</text>
+  <text x="464" y="386" class="s"><tspan class="m">compile_many</tspan> shares one translation unit</text>
+  <text x="464" y="404" class="s">across related kernels (all Bayer variants)</text>
+
+  <path d="M846,322 L846,424" stroke="#6b7280" stroke-width="1.5" marker-end="url(#a)" fill="none"/>
+
+  <!-- launch -->
+  <rect x="464" y="424" width="408" height="78" class="box" fill="#eaf2fd" stroke="#2a78d6"/>
+  <text x="480" y="448" class="t">CudaLaunchBuilder</text>
+  <text x="480" y="468" class="s">32×8 block (one warp per output row), clamped for small images</text>
+  <text x="480" y="487" class="s"><tspan class="m">CU_FUNC_CACHE_PREFER_L1</tspan> — L1 32 KB → 64 KB on Turing</text>
+
+  <path d="M668,502 L668,530" stroke="#6b7280" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- loads -->
+  <rect x="464" y="530" width="408" height="62" class="box" fill="#fdf0e9" stroke="#eb6834"/>
+  <text x="480" y="554" class="t"><tspan class="m" font-size="13">__ldg</tspan> read-only cache</text>
+  <text x="480" y="574" class="s">all kernels; texture objects were tried and removed (see note)</text>
+
+  <path d="M668,592 L668,614" stroke="#6b7280" stroke-width="1.5" marker-end="url(#a)"/>
+  <rect x="464" y="614" width="408" height="30" class="box" fill="#f3f4f6" stroke="#9ca3af"/>
+  <text x="480" y="634" class="s">cudarc — safe Rust bindings → CUDA driver</text>
+
+  <!-- note -->
+  <rect x="28" y="392" width="404" height="168" class="box" fill="#fcfcfb" stroke="#d1d5db" stroke-dasharray="4 3"/>
+  <text x="44" y="414" class="hdr">WHY NOT TEXTURE OBJECTS</text>
+  <text x="44" y="438" class="s">resize — <tspan font-weight="600">~10% slower</tspan>. <tspan class="m">tex2D</tspan> costs ~100 cycles</text>
+  <text x="44" y="456" class="s">on Turing vs ~30 for <tspan class="m">__ldg</tspan>, and sequential</text>
+  <text x="44" y="474" class="s">downscale is already well served by L1.</text>
+  <text x="44" y="500" class="s">warp — correct and faster, but pitch had to be</text>
+  <text x="44" y="518" class="s">32 B-aligned, so kernels <tspan font-weight="600">failed for any width</tspan></text>
+  <text x="44" y="536" class="s"><tspan font-weight="600">not a multiple of 8</tspan>. Removed in #1001.</text>
+</svg>
