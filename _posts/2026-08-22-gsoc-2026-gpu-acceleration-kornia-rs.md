@@ -259,12 +259,17 @@ Chasing exactness produced my favourite non-bug of the summer. Bilinear
 warp-affine was diverging from OpenCV by up to 0.82 at non-identity rotations,
 and it showed up right after a byte-exactness rewrite landed. It looked bad.
 
-It turned out to be neither a regression nor new. The CUDA kernel clamps the `+1`
-tap at source edges, `BORDER_REPLICATE`, because that's what the CPU
-`warp_affine` loop does and matching the CPU was the contract. OpenCV uses
+![]({{ site.baseurl }}/images/gsoc2026-gpu/parity.png "CPU/GPU parity and the OpenCV border seam")
+
+It turned out to be neither a regression nor new. The middle panel above is what
+`--fmad=false` bought: the same call on host and device operands, and not one of
+262,144 pixels differs. The right panel is where the 0.82 lives. The CUDA kernel
+clamps the `+1` tap at source edges, `BORDER_REPLICATE`, because that's what the
+CPU `warp_affine` loop does and matching the CPU was the contract. OpenCV uses
 `BORDER_CONSTANT`. The two disagree at exactly one pixel of border, and only
-where the inverse-mapped coordinate lands on an edge, which is why identity
-transforms matched to 8e-9 while rotations didn't. The rewrite hadn't introduced
+where the inverse-mapped coordinate lands on an edge. At 45° that edge is the
+diamond outline you can see, and it is why identity transforms matched to 8e-9
+while rotations didn't. The rewrite hadn't introduced
 anything. It had tightened the CPU/GPU match enough to make a pre-existing
 CPU-versus-OpenCV difference visible. The fix went into the test, not the kernel.
 
