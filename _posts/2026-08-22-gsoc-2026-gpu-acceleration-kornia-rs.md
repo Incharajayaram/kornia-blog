@@ -280,16 +280,55 @@ same."* Best process advice I got all summer.
 
 ## What shipped
 
-- **Resize**: nearest, bilinear, bicubic, Lanczos-3, plus byte-exact u8 paths
-- **Warp-affine and warp-perspective**: same four interpolants
-- **Remap**: the generic primitive behind lens undistortion, f32 and u8
-- **Colour conversion**: RGB to gray, HSV, HLS, YCbCr, BGR, Bayer demosaic
-- **Device-aware tensor storage**: `MemoryDomain`, pinned and unified allocators, DLPack-compatible foreign import
-- **Correctness tooling**: pixel-level parity against OpenCV CUDA and NVIDIA VPI
-- **A reproducible benchmark suite** with the H2D/kernel/D2H split, at 1080p and 4K, on desktop and Jetson
+Summarised: resize with four interpolants plus byte-exact u8 paths, warp-affine
+and warp-perspective with the same four, remap in f32 and u8, six colour
+conversions, the device-aware tensor storage underneath all of it, parity tooling
+against OpenCV CUDA and NVIDIA VPI, and a benchmark suite with the
+H2D/kernel/D2H split at 1080p and 4K on both desktop and Jetson.
 
-Element-wise and reduction tensor ops using the same domain dispatch, along with
-Laplacian and integral filters, are in review.
+Every pull request, in order:
+
+| PR | What it does |
+| --- | --- |
+| [#925](https://github.com/kornia/kornia-rs/pull/925) | GPU backend scaffold: feature flags, the `Backend` trait, a first allocator |
+| [#927](https://github.com/kornia/kornia-rs/pull/927) | CubeCL backend implementation plus a GPU allocator smoke test |
+| [#938](https://github.com/kornia/kornia-rs/pull/938) | Domain-aware tensor storage, and a home for experimental GPU imgproc |
+| [#943](https://github.com/kornia/kornia-rs/pull/943) | `gray_from_rgb_f32` with an AVX2+FMA path, on the CPU side |
+| [#946](https://github.com/kornia/kornia-rs/pull/946) | First GPU resize kernels, nearest and bilinear, on CubeCL |
+| [#958](https://github.com/kornia/kornia-rs/pull/958) | Warp-affine via NVRTC. The switch to native CUDA starts here |
+| [#967](https://github.com/kornia/kornia-rs/pull/967) | Benchmark results for the NVRTC resize and warp-affine kernels |
+| [#971](https://github.com/kornia/kornia-rs/pull/971) | CPU warp-affine: incremental coordinates, valid-range skip, 16-row Rayon chunks |
+| [#974](https://github.com/kornia/kornia-rs/pull/974) | Bicubic kernels for resize and warp-affine, Keys cubic with `a = -0.5` |
+| [#979](https://github.com/kornia/kornia-rs/pull/979) | Texture-object warp-affine kernels, later removed (see above) |
+| [#992](https://github.com/kornia/kornia-rs/pull/992) | `block_dim` override on the bicubic launchers, which had hardcoded it |
+| [#993](https://github.com/kornia/kornia-rs/pull/993) | Auto-clamp block dims for small images so thumbnails don't collapse occupancy |
+| [#994](https://github.com/kornia/kornia-rs/pull/994) | Lanczos-3, separable two-pass for resize and full 6x6 for warp |
+| [#998](https://github.com/kornia/kornia-rs/pull/998) | The remap primitive, with the benchmark behind the fused-vs-generic decision |
+| [#999](https://github.com/kornia/kornia-rs/pull/999) | Warp-perspective, bilinear, nearest and bicubic |
+| [#1032](https://github.com/kornia/kornia-rs/pull/1032) | Pixel-level correctness checks against OpenCV for resize and warp-affine |
+| [#1034](https://github.com/kornia/kornia-rs/pull/1034) | `cudaMallocManaged` support: the unified allocator and its Jetson numbers |
+| [#1035](https://github.com/kornia/kornia-rs/pull/1035) | The benchmark suite with the H2D / kernel / D2H breakdown |
+| [#1066](https://github.com/kornia/kornia-rs/pull/1066) | Post-merge review fixes on remap |
+| [#1068](https://github.com/kornia/kornia-rs/pull/1068) | u8 remap with fixed-point quantisation, byte-exact on CPU and CUDA |
+
+Four are still open at the time of writing:
+
+| PR | What it does |
+| --- | --- |
+| [#1115](https://github.com/kornia/kornia-rs/pull/1115) | Benchmarks for remap, colour conversion and the unified-memory path |
+| [#1116](https://github.com/kornia/kornia-rs/pull/1116) | Laplacian and integral filters with GPU support |
+| [#1121](https://github.com/kornia/kornia-rs/pull/1121) | Two optimizations to the existing CUDA SIFT kernels: register-tiling the vertical blur, and warp-aggregating the descriptor histogram atomics so lanes hitting the same bin combine before the atomic |
+| [#1122](https://github.com/kornia/kornia-rs/pull/1122) | Element-wise and reduction tensor ops dispatched on `MemoryDomain`, with in-place variants |
+
+Six were closed rather than merged. Most were superseded by a later PR, like
+#945 by #946 and #954 by #958, or were small CI fixes that got folded elsewhere.
+Two of them show up in this post.
+[#1017](https://github.com/kornia/kornia-rs/pull/1017) was the shared-memory
+tiling attempt, closed once it benchmarked slower.
+[#1036](https://github.com/kornia/kornia-rs/pull/1036) was the first version of
+the tensor ops, which a stale bot closed before anyone reviewed it. It came back
+as #1122 at a third of the size, once the parts that had been superseded upstream
+were stripped out.
 
 Next on my list: `INTER_AREA` done properly, tiling revisited for the kernels
 that actually reuse a tile, and Python bindings for the Jetson unified-memory
