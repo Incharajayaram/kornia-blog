@@ -4,12 +4,15 @@ layout: post
 description: A CUDA backend for kornia-rs. Runtime kernel compilation, device-aware memory, and the three optimizations I was sure about that turned out to be wrong.
 categories: [gsoc, announcement]
 image: images/gsoc2026-gpu/benchmarks.png
+author: [Inchara J]
 title: "GSoC 2026: GPU acceleration for kornia-rs"
 ---
 
-This summer I built a CUDA backend for [kornia-rs](https://github.com/kornia/kornia-rs),
-the Rust computer vision library. GPU kernels for resize, warp, remap and colour
-conversion, plus a device-aware tensor memory model to hang them on.
+I'm Inchara J, and this summer I worked on kornia-rs as a Google Summer of Code
+contributor. The project was a CUDA backend for
+[kornia-rs](https://github.com/kornia/kornia-rs), the Rust computer vision
+library: GPU kernels for resize, warp, remap and colour conversion, plus a
+device-aware tensor memory model to hang them on.
 
 Rust doesn't really have a native GPU vision library. If you need an accelerated
 `resize` or `warp_affine` from Rust today, you either call out to C++ or eat the
@@ -345,6 +348,10 @@ All of it lives in [kornia/kornia-rs](https://github.com/kornia/kornia-rs) behin
 the `cuda` feature flag.
 
 ---
+
+*Inchara J. GSoC 2026 contributor, kornia.
+[GitHub](https://github.com/Incharajayaram) ·
+[LinkedIn](https://linkedin.com/in/inchara-j-752050251)*
 
 *AI-use disclosure: portions of this post were drafted with assistance from
 Claude. All technical content, benchmarks, and design decisions are my own work.*
