@@ -167,12 +167,19 @@ benchmark, same commit, on an RTX 3090:
 
 | resize f32 bilinear, 1080p | CPU | H2D | Kernel | D2H | Round trip |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| GTX 1650 | 5.37 ms | 9.22 ms | 0.18 ms | 2.29 ms | **0.5x** |
-| RTX 3090 | 6.95 ms | 2.71 ms | 0.04 ms | 1.11 ms | **1.8x** |
+| GTX 1650 (discrete) | 5.37 ms | 9.22 ms | 0.18 ms | 2.29 ms | **0.5x** |
+| Jetson Orin Nano (integrated) | 5.09 ms | 3.73 ms | 1.44 ms | 1.28 ms | **0.8x** |
+| RTX 3090 (discrete) | 6.95 ms | 2.71 ms | 0.04 ms | 1.11 ms | **1.8x** |
 
 The kernel got 4.5x faster, which I expected. The transfers got 3.4x faster on
 the way up and 2x on the way down, which I hadn't thought about at all. On the
 3090 the round trip wins on 37 of the 58 operations, by up to 38x.
+
+The Jetson makes the same point from the other direction. Its GPU is far weaker
+than the 1650, and its kernel is eight times slower, but its round trip still
+comes out ahead, because CPU and GPU share the same physical RAM and there is no
+bus to cross. On bicubic it hits 1.9x where the 1650 manages 2.18x with a much
+faster kernel.
 
 So "PCIe dominates" was never a fact about GPUs. It was a fact about my GPU, and
 I was one sample away from writing it down as a law. What actually holds is
