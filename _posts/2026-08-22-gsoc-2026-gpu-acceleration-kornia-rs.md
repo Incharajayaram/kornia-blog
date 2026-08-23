@@ -1,311 +1,258 @@
 ---
 toc: true
 layout: post
-description: A CUDA backend for kornia-rs. Runtime kernel compilation, device-aware memory, and the three optimizations I was sure about that turned out to be wrong.
+description: A CUDA backend for kornia-rs, and the three optimizations I was sure about that turned out to be wrong.
 categories: [gsoc, announcement]
 image: images/gsoc2026-gpu/benchmarks.png
 author: [Inchara J]
 title: "GSoC 2026: GPU acceleration for kornia-rs"
 ---
 
-I'm Inchara J, and this summer I worked on kornia-rs as a Google Summer of Code
-contributor. I built a CUDA backend for
-[kornia-rs](https://github.com/kornia/kornia-rs): GPU kernels for resize, warp,
-remap and colour conversion, plus a device-aware tensor memory model to hang
-them on.
+I'm Inchara J, and this summer I worked on kornia-rs for Google Summer of Code.
+I built a CUDA backend for it: GPU kernels for resize, warp, remap and colour
+conversion, plus the memory model underneath them.
 
-Rust has no native GPU vision library. A Rust project needing accelerated
-`resize` or `warp_affine` today either calls out to C++ or pays Python interop
-overhead. The interesting problem wasn't algorithmic, CUDA bilinear
-interpolation is well understood but structural: how do you make CUDA kernels
-first-class in a Rust library, with `unsafe` confined to a thin layer, device
-memory obeying ownership rules, and no seconds-long compile stall on the first
-image?
+Rust doesn't really have a GPU vision library. If you want a fast `resize` or
+`warp_affine` from Rust today, you either call into C++ or go through Python and
+pay for it. The tricky part isn't the maths, it's fitting CUDA into Rust
+properly: keeping `unsafe` in one small place, making device memory follow Rust's
+ownership rules, and not freezing the first call while something compiles.
 
 ## Picking a backend, then changing my mind
 
-I initially worked with [CubeCL](https://github.com/tracel-ai/cubecl), a Rust GPU
-kernel DSL. Writing kernels in Rust instead of CUDA C is genuinely appealing, and
-I shipped three PRs on it, allocator scaffold, backend impl, nearest and
-bilinear resize.
+I started with [CubeCL](https://github.com/tracel-ai/cubecl), a Rust GPU kernel
+DSL. Writing kernels in Rust instead of CUDA C sounded great, and I shipped three
+PRs on it: the allocator scaffold, the backend, and nearest plus bilinear resize.
 
-The kernels worked and were slow. Downscale ran at **8-12 GB/s** on a card with
-192 GB/s of bandwidth.
+The kernels worked. They were also slow. Downscale ran at 8-12 GB/s on a card
+that can do 192 GB/s.
 
-The fix needed `__ldg`, the read-only cache load intrinsic 
-and control over
-the L1 cache configuration. CubeCL exposes neither, because it targets CUDA,
-WGPU and others through a common abstraction, and those are CUDA-specific. I
-rewrote the kernels as native CUDA C compiled at runtime through
-[NVRTC](https://docs.nvidia.com/cuda/nvrtc/), with
-[cudarc](https://github.com/coreylowman/cudarc) for safe driver bindings.
+To fix it I needed `__ldg`, the read-only cache load, and control over the L1
+cache setup. CubeCL doesn't give you either, and it can't really, because it
+targets CUDA and WGPU and others through one common layer and both of those are
+CUDA-only things. So I rewrote the kernels in plain CUDA C and compiled them at
+runtime with [NVRTC](https://docs.nvidia.com/cuda/nvrtc/), using
+[cudarc](https://github.com/coreylowman/cudarc) for the driver bindings.
 
-Downscale went to **~70 GB/s**. Roughly six times faster, from getting access to
-two intrinsics.
+Downscale jumped to about 70 GB/s. Six times faster, just from being allowed to
+write two things the abstraction wouldn't let me write.
 
-There was a second argument for the switch that I hadn't weighed. A reviewer
-pointed out that enabling the CubeCL feature pulled its whole compiler stack which is an MLIR pipeline and an LLVM downloader into every downstream build. It had
-also dragged a `js-sys` dependency into the workspace, which is a good sign
-you've taken a wrong turn in a computer vision crate. kornia-rs standardised on
-cudarc shortly after.
+There was a second reason I hadn't even thought about. A reviewer pointed out
+that turning on the CubeCL feature pulled its whole compiler stack, an MLIR
+pipeline and an LLVM downloader, into everyone's build. It had also dragged a
+`js-sys` dependency into the workspace, which is usually a sign you've gone wrong
+somewhere in a computer vision crate. kornia-rs moved to cudarc soon after.
 
-## How the backend works
+Throwing away three PRs stung. But I don't think I could have made the argument
+without building on CubeCL first.
+
+## How it works
 
 ![]({{ site.baseurl }}/images/gsoc2026-gpu/architecture.png "Backend architecture")
 
-Each kernel is a Rust `&'static str` of CUDA C, compiled to PTX by NVRTC on first
-call and cached in a per-process `OnceLock<CudaKernel>`. Later calls get the
-cached kernel with no per-call or per-size recompilation. NVRTC costs 300-800 ms
-for the largest kernels, invisible amortised across a process lifetime, painful
-if paid per image.
+Every kernel is a Rust `&'static str` holding CUDA C. The first call compiles it
+to PTX with NVRTC and stores it in a `OnceLock<CudaKernel>`. Every call after
+that gets the cached one, with no recompiling per call or per image size. NVRTC
+takes 300-800 ms on the bigger kernels, which nobody notices once per process and
+everybody would notice once per frame.
 
-Two details worth calling out. Compute capability is detected at runtime and
-memoised, so the same build runs on any NVIDIA GPU without recompiling the crate.
-And after compilation each kernel sets `CU_FUNC_CACHE_PREFER_L1`, which grows
-Turing's L1 from 32 KB to 64 KB and lifts hit rates for the scattered reads that
-bicubic (4x4 taps) and Lanczos (6x6) do, and it costs nothing in the source.
+Compute capability is checked at runtime, so one build runs on any NVIDIA GPU.
+Each kernel also sets `CU_FUNC_CACHE_PREFER_L1`, which takes Turing's L1 from
+32 KB to 64 KB and helps the kernels doing scattered reads.
 
 ![]({{ site.baseurl }}/images/gsoc2026-gpu/memory-model.png "Tensor memory model")
 
-On the memory side, a `Tensor<T, N>` owns a `Box<dyn MemoryResource>` carrying a
-`MemoryDomain`: `Host`, `Device { id }`, or `Unified { id }`. Host slice access
-asserts the domain is host-accessible, so handing a device tensor to a CPU API
-fails loudly instead of dereferencing device memory from the host.
+For memory, a `Tensor<T, N>` owns a `Box<dyn MemoryResource>` that carries a
+`MemoryDomain`: `Host`, `Device`, or `Unified`. Host slice access checks that the
+domain is host-readable, so passing a device tensor into a CPU function fails
+loudly instead of quietly reading device memory from the CPU.
 
-That domain also drives dispatch. The public `resize`, `warp_affine`,
-`warp_perspective` and colour functions are unchanged from a caller's view: host
-operands take the CPU path, device operands launch a kernel, and a mixed pair is
-a typed error. **Nothing transfers implicitly**, if data crosses PCIe, you wrote
+That same domain picks the path. `resize`, `warp_affine`, `warp_perspective` and
+the colour functions look exactly like they did before. Host inputs go to the CPU
+code, device inputs launch a kernel, and mixing the two is an error. Nothing
+moves between host and device on its own. If your data crosses PCIe, you wrote
 the line that moved it.
 
-## Texture objects, tried twice, removed twice
+## Texture objects, tried twice, dropped twice
 
 Warp-affine with `BORDER_CONSTANT` normally needs a bounds check in every thread:
-if the inverse-mapped coordinate falls outside the source, write zero. On a 45°
-rotation about half the output pixels are black corners, so that branch diverges
-badly.
+if the mapped coordinate lands outside the image, write zero. Rotate by 45 degrees
+and about half your output pixels are black corners, so that branch splits the
+warp badly.
 
-Binding the source as a CUDA texture with `CU_TR_ADDRESS_MODE_BORDER` deletes the
-branch, out-of-bounds fetches return the border colour *in hardware*. It worked,
-it was faster, and it shipped.
+Bind the source as a CUDA texture with `CU_TR_ADDRESS_MODE_BORDER` and the branch
+disappears, because out-of-bounds reads return the border colour in hardware. It
+worked, it was faster, it shipped.
 
-So I tried the same thing for resize. It made it **~10% slower**.
+So I tried it on resize too, where it made things about 10% slower. `tex2D` costs
+around 100 cycles on Turing where `__ldg` costs about 30, and you're meant to win
+that back through 2D caching. But downscale reads straight along rows, which L1
+handles fine already, and there's no branch to remove. You pay and get nothing.
 
-Resize has none of the properties that make textures pay. `tex2D` costs roughly
-100 cycles of instruction latency on Turing against about 30 for `__ldg`, and it
-earns that back through 2D spatial caching and hardware boundary handling. But
-sequential downscale reads consecutive source columns, which the unified L1
-already coalesces just as well, and downscale has no out-of-bounds divergence to
-remove. You pay the latency and get nothing back.
+Then the warp version had to go as well, and not because it was slow. A
+1-channel pitch-2D texture makes `pitchInBytes = src_w * 3 * 4`, and CUDA needs
+that to be a multiple of 32 bytes. Our rows are packed tight, so the kernels just
+failed on any image width that isn't a multiple of 8. Fixing the alignment would
+mean copying the image into a padded buffer on every call, which costs more than
+the branch it was saving.
 
-Then the warp-affine texture path had to go too, not for performance, for
-correctness. A 1-channel pitch-2D texture makes `pitchInBytes = src_w × 3 × 4`,
-and CUDA requires that to be a multiple of `CU_DEVICE_ATTRIBUTE_TEXTURE_PITCH_ALIGNMENT`
-(32 bytes). The rows are densely packed, so **the kernels failed outright for
-every source width not a multiple of 8**. Satisfying the alignment would have
-meant a padded device-to-device copy on every call, which costs more than the
-divergence it saves.
-
-So textures are gone from the whole backend and everything reads through `__ldg`.
-An optimization that is correct only on convenient input sizes is not an
-optimization.
-
-## One design question worth the detour
-
-Warp-perspective and remap overlap heavily: remap samples a source image at
-caller-supplied `(map_x, map_y)` coordinates, and a perspective warp is just a
-particular coordinate map. So should perspective be a thin wrapper that
-precomputes a map and calls remap, or its own fused kernel?
-
-The generic version is better for maintenance, so I benchmarked before
-committing: remap-bilinear landed within 6% of the fused kernel, but
-remap-nearest was **30-51% slower**. Reading a precomputed coordinate map costs
-two extra float loads per pixel, nothing beside bilinear's four samples, a lot
-beside nearest-neighbour's single fetch.
-
-So both exist: remap as the general primitive that lens undistortion builds on,
-and fused warps where the arithmetic is cheap enough that map traffic dominates.
+So textures are gone everywhere and everything reads through `__ldg`. I'm still a
+bit annoyed about that one, because the warp version was a good idea and it only
+broke on image sizes I hadn't tested.
 
 ## Results
 
-![]({{ site.baseurl }}/images/gsoc2026-gpu/benchmarks.png "Kernel times against OpenCV CUDA and PyTorch, and round-trip economics on two cards")
+![]({{ site.baseurl }}/images/gsoc2026-gpu/benchmarks.png "Kernel times against OpenCV CUDA and PyTorch, and round-trip on two cards")
 
-GTX 1650, against OpenCV 4.12 CUDA and PyTorch 2.9+cu128, all three re-measured
-on the same card with the same loop: 50 warmup, 200 timed iterations, one sync
-after the batch.
+GTX 1650, against OpenCV 4.12 CUDA and PyTorch 2.9. All three measured on the
+same card with the same loop: 50 warmup, 200 timed runs, one sync at the end.
 
-Resize 1920×1080 → 960×540, and warp-affine at 45°, kernel time:
+Resize 1920x1080 to 960x540, and warp-affine at 45 degrees, kernel time:
 
 | Operation | kornia-rs | cv2 CUDA | PyTorch | vs cv2 | vs PyTorch |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| resize nearest | 0.107 ms | 0.217 ms | 0.109 ms | **2.0×** | 1.0× |
-| resize bilinear | 0.178 ms | 0.291 ms | 0.182 ms | **1.6×** | 1.0× |
-| resize bicubic | 0.245 ms | 0.569 ms | 1.493 ms | **2.3×** | **6.1×** |
-| warp-affine | 0.592 ms | 0.763 ms | 3.177 ms | 1.3× | **5.4×** |
+| resize nearest | 0.107 ms | 0.217 ms | 0.109 ms | **2.0x** | 1.0x |
+| resize bilinear | 0.178 ms | 0.291 ms | 0.182 ms | **1.6x** | 1.0x |
+| resize bicubic | 0.245 ms | 0.569 ms | 1.493 ms | **2.3x** | **6.1x** |
+| warp-affine | 0.592 ms | 0.763 ms | 3.177 ms | 1.3x | **5.4x** |
 
-kornia-rs beats OpenCV CUDA on every operation and is level with PyTorch on the
-cheap interpolants, pulling well ahead on the expensive ones. The PyTorch gap is
-widest on warp because `F.affine_grid` + `F.grid_sample` allocates an
-intermediate coordinate-grid tensor on every call; kornia-rs allocates nothing
-intermediate.
+We beat OpenCV CUDA on all of them, tie PyTorch on the cheap ones and pull ahead
+on the expensive ones. The PyTorch gap is biggest on warp because
+`F.affine_grid` plus `F.grid_sample` builds a whole coordinate grid tensor every
+call, and we build nothing.
 
-Colour conversion reaches **170 GB/s at 1080p, 89% of the card's theoretical
-peak** which is the number I'm happiest with, because it's a roofline claim rather than
-a relative one. There is not much left on the table when you are that close to
-what the memory system can deliver.
+Colour conversion hits 170 GB/s at 1080p, which is 89% of what the card can do.
+That's the number I like most, because it isn't a comparison with anyone. It just
+says there isn't much left to get.
 
 ### What byte-exactness cost
 
-There is one number above I would have reported differently a few months ago.
-When I analyzed the benchmarks mid-project, bilinear resize measured 0.101 ms. Today the
-same kernel on the same card measures 0.178 ms which is about 70% slower.
+Bilinear resize used to measure 0.101 ms. It's 0.178 ms now, about 70% slower,
+and nothing broke.
 
-Nothing regressed by accident. `CudaKernel::compile` now passes **`--fmad=false`**
-to NVRTC, which disables implicit fused multiply-add contraction so that a plain
-`a*b + c` in kernel source rounds twice, exactly as the same expression rounds on
-the CPU. That is what makes the GPU output *bit-identical* to the CPU path rather
-than merely close, and bit-identical is the contract the parity tests check.
+`CudaKernel::compile` passes `--fmad=false` to NVRTC now, which stops the
+compiler fusing multiply and add. A plain `a*b + c` then rounds twice, exactly
+like it does on the CPU. That's what makes the GPU output bit-identical to the
+CPU output instead of just close, and bit-identical is what the tests check.
 
-FMA contraction is not a small optimization to give up, and the cost landed
-unevenly. Bicubic didn't regress at all (0.245 ms then and now) because its Horner
-weights were rewritten to call `fmaf()` explicitly, so kernels that want fusion keep
-it by saying so. Bilinear's tap accumulation is plain `a*b + c`, so it pays.
+It didn't hit everything equally. Bicubic didn't slow down at all, because its
+weights were changed to call `fmaf()` directly, so kernels that want fusion can
+still ask for it. Bilinear's plain `a*b + c` pays.
 
-Was it worth 70% of one kernel? I think yes. A GPU path that is *almost* the same
-as the CPU path is a source of bug reports nobody can reproduce, and "almost"
-compounds through a pipeline. But it is a real trade, it is not free, and a
-faster-looking number in an older document does not mean the code got worse, it
-means it got stricter.
+Worth 70% of one kernel? I think so, though I went back and forth. A GPU path
+that's *almost* the same as the CPU one gives you bug reports nobody can
+reproduce.
 
-### The result that reframed the project
+### The result that changed how I think about this
 
-Those are all *kernel* times, which is the fair comparison against cv2 CUDA. But
-it isn't what a caller experiences if the data starts on the host. So I built a
-benchmark separating host-to-device transfer, kernel, and device-to-host.
+Those are kernel times, which is the fair comparison against cv2 CUDA. It isn't
+what you actually get if your data starts on the CPU. So I built a benchmark that
+splits out upload, kernel, and download.
 
-On my GTX 1650, the answer was blunt:
+On my GTX 1650:
 
-| Operation | Resolution | CPU | H2D | Kernel | D2H | Kernel | Round-trip |
+| Operation | Resolution | CPU | H2D | Kernel | D2H | Kernel | Round trip |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | resize (f32) bilinear | 1080p to 540p | 5.37 ms | 9.22 ms | 0.18 ms | 2.29 ms | **29.2x** | **0.5x** |
 | gray_from_rgb (u8) | 4K | 2.57 ms | 9.22 ms | 0.19 ms | 2.94 ms | **13.2x** | **0.2x** |
 
-The kernel is 13 to 29 times faster than the CPU, and the round trip is still
-*slower than staying on the CPU*. The transfers cost about sixty times what the
-kernel costs. That is the whole argument for refusing implicit
-transfers: a backend that quietly uploaded and downloaded around every call would
-be slower than the CPU path while looking like an optimization, and nobody would
-be able to see it happening.
+The kernel is 13 to 29 times faster and the round trip is still slower than just
+using the CPU. The transfers cost about sixty times what the kernel does. That's
+the whole reason the API refuses to move data on its own: a backend that quietly
+uploaded and downloaded around every call would be slower than the CPU while
+looking like a speedup, and you'd have no way to see it.
 
-I was ready to state that as a general property of bandwidth-bound GPU work.
-Then a friend ran the same benchmark, same commit, on an RTX 3090:
+I nearly wrote that up as a general fact about GPUs. Then a friend ran the same
+benchmark, same commit, on an RTX 3090:
 
-| resize f32 bilinear, 1080p | CPU | H2D | Kernel | D2H | Round-trip |
+| resize f32 bilinear, 1080p | CPU | H2D | Kernel | D2H | Round trip |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | GTX 1650 | 5.37 ms | 9.22 ms | 0.18 ms | 2.29 ms | **0.5x** |
 | RTX 3090 | 6.95 ms | 2.71 ms | 0.04 ms | 1.11 ms | **1.8x** |
 
-The kernel got 4.5x faster, which I expected. The transfers also got 3.4x faster
-on the upload and 2x on the download, which I had not thought about at all. On
-the 3090 the round trip **wins on 37 of the 58 benchmarked operations**, by up to
-38x. Bicubic resize goes from 2.1x to 8.4x.
+The kernel got 4.5x faster, which I expected. The transfers got 3.4x faster on
+the way up and 2x on the way down, which I hadn't thought about at all. On the
+3090 the round trip wins on 37 of the 58 operations, by up to 38x.
 
-So "PCIe dominates" was never a fact about GPUs. It was a fact about my GPU, on
-a narrower link, and I had been about to generalise from a sample of one. What
-actually holds is the weaker and more useful claim: whether a transfer pays for
-itself depends on the ratio between your link and your CPU, it varies by more
-than an order of magnitude across cards, and the only way to know is to measure
-the machine you are shipping on. Which is why the benchmark reports the split
-instead of a single number.
+So "PCIe dominates" was never a fact about GPUs. It was a fact about my GPU, and
+I was one sample away from writing it down as a law. What actually holds is
+smaller: whether a transfer pays for itself depends on your link and your CPU, it
+changes by more than 10x between cards, and you have to measure the machine
+you're shipping on. Which is why the benchmark prints the split instead of one
+number.
 
-One honest caveat on that 3090 run. Its host is a virtualised Haswell vCPU, so
-the CPU baseline is weak and every CPU-relative ratio on that machine is
-optimistic by some amount I can't quantify without a second run on real
-hardware. The kernel and transfer columns are unaffected. The direction of the
-result survives the caveat comfortably, but the exact multipliers should be read
-as a range, not a measurement.
-
-Either way, the device path is at its best when a tensor becomes device-resident
-and *stays* there across a chain of operations, because then the transfer is
-paid once instead of per call. That is what the domain dispatch exists to allow.
+Either way, the GPU path is at its best when a tensor goes to the device and
+*stays* there for several operations, so the transfer is paid once.
 
 ## Three things I got wrong
 
-Halfway through I wrote a paper on this work whose "future work" section made
+Halfway through I wrote a paper on this, and its future work section made
 predictions I then got to test. I don't fully recommend the experience.
 
-**Shared-memory tiling. Predicted ~20% faster; measured 1.5× slower at 2×
-downscale and 7× slower at 4×.** The textbook optimization: neighbouring threads
-read overlapping source pixels, so stage a tile in shared memory and compute the
-block from there. But bilinear samples exactly **four source pixels per output
-pixel regardless of scale factor**, at 4× downscale, adjacent outputs read
-regions four pixels apart, so there's almost no overlap to exploit, while the
-tile load fetches everything in the region including the three quarters nobody
-wanted. I'd replaced a sparse, well-cached access pattern with a dense one. The
-clue was in my own benchmark output weeks earlier: downscale was already running
-at 84-91% of achievable DRAM bandwidth, so there was no headroom for a cache
-trick to recover.
+**Shared memory tiling. I said ~20% faster. It was 1.5x slower at 2x downscale
+and 7x slower at 4x.** The classic move: neighbouring threads read overlapping
+pixels, so load a tile into shared memory once and work from there. But bilinear
+reads exactly four source pixels per output pixel whatever the scale. At 4x those
+four are spread far apart, so there's barely any overlap to reuse, while the tile
+load fetches everything in between anyway. I turned a sparse, well-cached read
+pattern into a dense one. The clue had been in my own benchmark output for weeks:
+downscale was already at 84-91% of the DRAM bandwidth I could get, so there was
+nothing left for a cache trick to find.
 
-**`INTER_AREA`. Predicted 15-30% faster; no improvement.** The follow-up that was
-meant to justify tiling, since area-averaging for integer ratios should be cheaper
-than bilinear. It wasn't, and the branch is still sitting unopened.
+**`INTER_AREA`. I said 15-30% faster. It did nothing.** This was the follow-up
+that tiling was supposed to enable. It wasn't faster, and the branch is still
+sitting there unopened.
 
 **Unified memory. A real win, on half the hardware.** `cudaMallocManaged` gives
-one pointer valid on host and device, which on a Jetson, where CPU and GPU share
-physical DRAM, should eliminate transfers entirely. It does, and it loses badly
-on a discrete card.
+you one pointer that works on both sides. On a Jetson, where CPU and GPU share
+the same RAM, that should remove the copies completely. It does. On a discrete
+card it loses badly:
 
 | Size | Jetson explicit | Jetson unified | | GTX 1650 explicit | GTX 1650 unified | |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| VGA 640×480 | 2.509 ms | 1.813 ms | **1.38×** | 2.329 ms | 4.053 ms | 0.57× |
-| FHD 1920×1080 | 12.639 ms | 7.410 ms | **1.71×** | 17.199 ms | 26.041 ms | 0.66× |
-| 4K 3840×2160 | 47.318 ms | 27.517 ms | **1.72×** | 67.520 ms | 102.180 ms | 0.66× |
+| VGA 640x480 | 2.509 ms | 1.813 ms | **1.38x** | 2.329 ms | 4.053 ms | 0.57x |
+| FHD 1920x1080 | 12.639 ms | 7.410 ms | **1.71x** | 17.199 ms | 26.041 ms | 0.66x |
+| 4K 3840x2160 | 47.318 ms | 27.517 ms | **1.72x** | 67.520 ms | 102.180 ms | 0.66x |
 
-Output is bit-identical on both. On the integrated part it removes a real copy;
-on the discrete one the driver demand-pages over PCIe and pays more than the
-copies it removed. There's a second trap in allocation: `cuMemAllocManaged` is
-about **3000× more expensive** than a pooled device allocation (42 ms vs 0.013 ms
-for a 4K buffer), so unified buffers must be allocated once and reused, an
-allocate-per-frame loop erases the whole benefit.
+Output is bit-identical on both. On the Jetson it removes a real copy. On the
+discrete card the driver pages memory over PCIe on demand and ends up paying more
+than the copies it removed.
 
-It shipped with that framing, and the benchmark reports `cudaDevAttrIntegrated`
-so any run says which case it measured.
+There's a second trap in the allocation. `cuMemAllocManaged` is about 3000x more
+expensive than a normal device alloc, 42 ms against 0.013 ms for a 4K buffer. So
+you allocate once and reuse, or you lose the whole benefit. The benchmark reports
+whether the GPU is integrated, so a run tells you which case you're in.
 
 ## The bug that wasn't
 
-The same pursuit of exactness produced my favourite non-bug. Bilinear
-warp-affine was diverging from OpenCV by up to 0.82 at non-identity rotations,
-appearing right after a byte-exactness rewrite landed. It looked serious.
+Chasing exactness turned up my favourite non-bug. Bilinear warp-affine was off
+from OpenCV by up to 0.82 at rotated angles, right after a byte-exactness rewrite
+landed. It looked bad.
 
 ![]({{ site.baseurl }}/images/gsoc2026-gpu/parity.png "CPU/GPU parity and the OpenCV border seam")
 
-It was neither a regression nor new. The middle panel above is what
-`--fmad=false` bought: the same call on host and device operands, and not one of
-262,144 pixels differs. The right panel is where the 0.82 lives. The CUDA kernel
-clamps the `+1` tap at source edges, `BORDER_REPLICATE`, because that is what the
-CPU `warp_affine` loop does, and matching the CPU was the contract. OpenCV uses
-`BORDER_CONSTANT`.
-The two disagree at exactly one pixel of border, and only where the
-inverse-mapped coordinate lands on an edge. At 45° that edge is the diamond
-outline you can see, and it is why identity transforms matched to 8e-9 while
-rotations didn't. The rewrite hadn't introduced the
-divergence; it had tightened the CPU/GPU match enough to expose a pre-existing
-CPU-vs-OpenCV difference. The fix was to the *test*, not the kernel.
+It wasn't a regression and it wasn't new. The middle panel is what `--fmad=false`
+bought: same call on CPU and GPU, and not one of 262,144 pixels differs. The
+right panel is where the 0.82 lives. Our kernel clamps the `+1` tap at the image
+edge because that's what the CPU code does, and OpenCV zero-fills instead. They
+disagree on one pixel of border, only where the mapped coordinate lands on an
+edge. At 45 degrees that edge is the diamond you can see, which is why identity
+transforms matched to 8e-9 and rotations didn't.
 
-The parity suite existed at all because my mentor asked for it early: *"make sure
+The fix went into the test, not the kernel.
+
+That test suite only existed because my mentor asked for it early on: *"make sure
 all the algorithms match output with the reference libraries. I found in some
 cases that the algorithms get faster but the results are not exactly the same."*
-Best process advice I got all summer.
+Best advice I got all summer.
 
 ## What shipped
 
-- **Resize**: nearest, bilinear, bicubic, Lanczos-3, plus byte-exact u8 paths
-- **Warp-affine and warp-perspective**: same four interpolants
-- **Remap**: the generic primitive behind lens undistortion, f32 and u8
-- **Colour conversion**: RGB↔gray, HSV, HLS, YCbCr, BGR, Bayer demosaic
-- **Device-aware tensor storage**: `MemoryDomain`, pinned and unified allocators, DLPack-compatible foreign import
-- **Correctness tooling**: pixel-level parity against OpenCV CUDA and NVIDIA VPI
-- **A reproducible benchmark suite** with the H2D/kernel/D2H split, 1080p and 4K, desktop and Jetson
+Resize with four interpolations plus byte-exact u8 paths, warp-affine and
+warp-perspective with the same four, remap in f32 and u8, six colour conversions,
+the device-aware tensor storage under all of it, correctness checks against
+OpenCV CUDA and NVIDIA VPI, and a benchmark suite that splits upload, kernel and
+download at 1080p and 4K on desktop and Jetson.
 
 Every pull request, in order:
 
@@ -477,7 +424,7 @@ which is the one shape where the transfer arithmetic works out on any card.
 The summation-accuracy probe returned bit-identical numbers on the 3090 and the
 GTX 1650: CPU 48614172786688, GPU 49982858067968, against a true value of
 50000000004999.8. Two different architectures, same two answers, which is what
-you would hope for from a deterministic reduction and a deterministic bug.
+you would hope for from a reduction that behaves the same way twice, and a bug that does too.
 
 ## Thanks
 
