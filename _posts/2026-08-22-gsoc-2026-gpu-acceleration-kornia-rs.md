@@ -128,7 +128,7 @@ and fused warps where the arithmetic is cheap enough that map traffic dominates.
 
 ## Results
 
-![]({{ site.baseurl }}/images/gsoc2026-gpu/benchmarks.png "Benchmarks vs OpenCV CUDA and PyTorch")
+![]({{ site.baseurl }}/images/gsoc2026-gpu/benchmarks.png "Kernel times against OpenCV CUDA and PyTorch, and round-trip economics on two cards")
 
 GTX 1650, against OpenCV 4.12 CUDA and PyTorch 2.9+cu128, all three re-measured
 on the same card with the same loop: 50 warmup, 200 timed iterations, one sync
@@ -183,19 +183,50 @@ Those are all *kernel* times, which is the fair comparison against cv2 CUDA. But
 it isn't what a caller experiences if the data starts on the host. So I built a
 benchmark separating host-to-device transfer, kernel, and device-to-host.
 
+On my GTX 1650, the answer was blunt:
+
 | Operation | Resolution | CPU | H2D | Kernel | D2H | Kernel | Round-trip |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| resize (f32) bilinear | 1080p→540p | 5.28 ms | 9.16 ms | 0.18 ms | 2.21 ms | **28.7×** | **0.5×** |
-| gray_from_rgb (u8) | 4K | 6.18 ms | 9.61 ms | 0.30 ms | 8.78 ms | **20.8×** | **0.3×** |
+| resize (f32) bilinear | 1080p to 540p | 5.28 ms | 9.16 ms | 0.18 ms | 2.21 ms | **28.7x** | **0.46x** |
+| gray_from_rgb (u8) | 4K | 6.18 ms | 9.61 ms | 0.30 ms | 8.78 ms | **20.8x** | **0.3x** |
 
-The kernel is 20-30× faster. The round trip is *slower than staying on the CPU*.
-For bandwidth-bound operations PCIe dominates so completely the kernel barely
-registers.
+The kernel is 20-30x faster and the round trip is *slower than staying on the
+CPU*. The transfers cost eleven times what the kernel costs. That is the whole
+argument for refusing implicit transfers: a backend that quietly uploaded and
+downloaded around every call would be slower than the CPU path while looking
+like an optimization, and nobody would be able to see it happening.
 
-That's not a disappointing result, it's the design constraint stated numerically and it's exactly why the API refuses implicit transfers. A backend that
-silently uploaded and downloaded around every call would be slower than the CPU
-path while looking like an optimization. The device path pays off when a tensor
-becomes device-resident and *stays* there across many operations.
+I was ready to state that as a general property of bandwidth-bound GPU work.
+Then a friend ran the same benchmark, same commit, on an RTX 3090:
+
+| resize f32 bilinear, 1080p | CPU | H2D | Kernel | D2H | Round-trip |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| GTX 1650 | 5.28 ms | 9.16 ms | 0.18 ms | 2.21 ms | **0.46x** |
+| RTX 3090 | 6.95 ms | 2.71 ms | 0.04 ms | 1.11 ms | **1.8x** |
+
+The kernel got 4.5x faster, which I expected. The transfers also got 3.4x faster
+on the upload and 2x on the download, which I had not thought about at all. On
+the 3090 the round trip **wins on 37 of the 58 benchmarked operations**, by up to
+38x. Bicubic resize goes from 2.1x to 8.4x.
+
+So "PCIe dominates" was never a fact about GPUs. It was a fact about my GPU, on
+a narrower link, and I had been about to generalise from a sample of one. What
+actually holds is the weaker and more useful claim: whether a transfer pays for
+itself depends on the ratio between your link and your CPU, it varies by more
+than an order of magnitude across cards, and the only way to know is to measure
+the machine you are shipping on. Which is why the benchmark reports the split
+instead of a single number.
+
+One honest caveat on that 3090 run. Its host is a virtualised Haswell vCPU, so
+the CPU baseline is weak and every CPU-relative ratio on that machine is
+optimistic by some amount I can't quantify without a second run on real
+hardware. The kernel and transfer columns are unaffected. The direction of the
+result survives the caveat comfortably, but the exact multipliers should be read
+as a range, not a measurement.
+
+Either way, the device path is at its best when a tensor becomes device-resident
+and *stays* there across a chain of operations, because then the transfer is
+paid once instead of per call. That is what the domain dispatch exists to allow.
 
 ## Three things I got wrong
 
@@ -323,7 +354,9 @@ were stripped out.
 ## Thanks
 
 To Edgar Riba and Christie Purackal for review consistently more careful than the code deserved, for
-the Jetson access that made half these numbers possible. And to the kornia community. Everything
+the Jetson access that made half these numbers possible, and to the friend who
+ran the whole suite on an RTX 3090 and accidentally overturned one of my
+conclusions. And to the kornia community. Everything
 is in [kornia/kornia-rs](https://github.com/kornia/kornia-rs) behind the `cuda`
 feature flag.
 
