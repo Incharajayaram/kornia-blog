@@ -187,25 +187,27 @@ On my GTX 1650, the answer was blunt:
 
 | Operation | Resolution | CPU | H2D | Kernel | D2H | Kernel | Round-trip |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| resize (f32) bilinear | 1080p to 540p | 5.28 ms | 9.16 ms | 0.18 ms | 2.21 ms | **28.7x** | **0.46x** |
-| gray_from_rgb (u8) | 4K | 6.18 ms | 9.61 ms | 0.30 ms | 8.78 ms | **20.8x** | **0.3x** |
+| resize (f32) bilinear | 1080p to 540p | 12.05 ms | 18.80 ms | 0.18 ms | 3.95 ms | **65.5x** | **0.5x** |
+| gray_from_rgb (u8) | 4K | 7.94 ms | 19.15 ms | 0.19 ms | 5.58 ms | **40.8x** | **0.3x** |
 
-The kernel is 20-30x faster and the round trip is *slower than staying on the
-CPU*. The transfers cost eleven times what the kernel costs. That is the whole
-argument for refusing implicit transfers: a backend that quietly uploaded and
-downloaded around every call would be slower than the CPU path while looking
-like an optimization, and nobody would be able to see it happening.
+The kernel is 40 to 65 times faster than the CPU, and the round trip is still
+*slower than staying on the CPU*. The transfers cost more than a hundred times
+what the kernel costs. That is the whole argument for refusing implicit
+transfers: a backend that quietly uploaded and downloaded around every call would
+be slower than the CPU path while looking like an optimization, and nobody would
+be able to see it happening.
 
 I was ready to state that as a general property of bandwidth-bound GPU work.
 Then a friend ran the same benchmark, same commit, on an RTX 3090:
 
 | resize f32 bilinear, 1080p | CPU | H2D | Kernel | D2H | Round-trip |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| GTX 1650 | 5.28 ms | 9.16 ms | 0.18 ms | 2.21 ms | **0.46x** |
+| GTX 1650 | 12.05 ms | 18.80 ms | 0.18 ms | 3.95 ms | **0.5x** |
 | RTX 3090 | 6.95 ms | 2.71 ms | 0.04 ms | 1.11 ms | **1.8x** |
 
-The kernel got 4.5x faster, which I expected. The transfers also got 3.4x faster
-on the upload and 2x on the download, which I had not thought about at all. On
+The kernel got 4.5x faster, which I expected. The transfers also got roughly 7x
+faster on the upload and 3.5x on the download, which I had not thought about at
+all. On
 the 3090 the round trip **wins on 37 of the 58 benchmarked operations**, by up to
 38x. Bicubic resize goes from 2.1x to 8.4x.
 
@@ -365,14 +367,15 @@ cd kornia-rs && cargo bench --bench bench_cuda_imgproc --features cuda
 Commit `b887ffd` on both machines, 30 warmup and 100 timed iterations, CUDA
 events, rotating source buffers. All times in milliseconds.
 
-Two caveats on which columns to trust. The kernel columns are hardware
-measurements and compare cleanly across machines. The host columns (CPU, H2D,
-D2H, round trip) are shown for the 3090 only: that machine is a virtualised
-Haswell vCPU so its CPU baseline is weak and its ratios are optimistic, and my
-own laptop's host numbers move by a factor of two depending on whether the CPU
-governor is boosting, which makes them useless for a published comparison. Kernel
-time did not move at all between those runs, which is why it is the column the
-cross-machine claim rests on.
+One measurement note. Kernel times are hardware-determined and reproduce exactly:
+across four runs on the GTX 1650 at different system loads and CPU governors, the
+kernel column never moved. Host-side numbers are less stable. My 1650 figures
+here come from two back-to-back runs that agree within 1% on every column, but an
+earlier session a day before produced host numbers roughly half these, for
+reasons I could not pin down (the machine has only 7 GB of RAM, so pageable
+transfer staging is my best guess). The 3090 host is a virtualised Haswell vCPU,
+so its CPU baseline is weak and its ratios are optimistic. Treat kernel columns as
+measurements and host columns as indicative.
 
 **The gain from a bigger GPU is not a single number.** Median 4.9x, ranging from
 11.6x on `warp_affine u8` down to 1.0x on `integral` at 1080p. Point-sampling
@@ -381,66 +384,66 @@ the dependency chain is serial no matter how many SMs you have. Lanczos sits nea
 the bottom too (1.4x) for the same reason: it is compute-bound on a fixed tap
 count rather than starved for bandwidth.
 
-| Operation | Interp | Resolution | 1650 kernel | 3090 kernel | 3090 gain | 3090 CPU | 3090 H2D | 3090 D2H | 3090 round trip |
+| Operation | Interp | Resolution | 1650 CPU | 1650 kernel | 1650 trip | 3090 CPU | 3090 kernel | 3090 trip | 3090/1650 kernel |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| resize (f32) | bilinear | 1920×1080→960×540 | 0.18 | 0.04 | 4.5x | 6.95 | 2.71 | 1.11 | 1.8x |
-| resize (f32) | bilinear | 3840×2160→1920×1080 | 0.71 | 0.15 | 4.7x | 20.66 | 11.36 | 2.20 | 1.5x |
-| resize (f32) | nearest | 1920×1080→960×540 | 0.11 | 0.03 | 3.7x | 2.85 | 2.67 | 0.71 | 0.8x |
-| resize (f32) | nearest | 3840×2160→1920×1080 | 0.43 | 0.10 | 4.3x | 8.54 | 11.29 | 2.01 | 0.6x |
-| resize (f32) | bicubic | 1920×1080→960×540 | 0.24 | 0.05 | 4.8x | 29.24 | 2.83 | 0.62 | 8.4x |
-| resize (f32) | bicubic | 3840×2160→1920×1080 | 0.93 | 0.16 | 5.8x | 87.69 | 10.61 | 2.01 | 6.9x |
-| resize (f32) | lanczos | 1920×1080→960×540 | 0.41 | 0.30 | 1.4x | 5.25 | 3.09 | 0.55 | 1.3x |
-| resize (f32) | lanczos | 3840×2160→1920×1080 | 1.55 | 0.87 | 1.8x | 18.67 | 11.50 | 2.16 | 1.3x |
-| resize (u8) | bilinear | 1920×1080→960×540 | 0.07 | 0.02 | 3.5x | 5.27 | 0.57 | 0.20 | 6.7x |
-| resize (u8) | bilinear | 3840×2160→1920×1080 | 0.24 | 0.05 | 4.8x | 18.43 | 2.52 | 0.67 | 5.7x |
-| resize (u8) | nearest | 1920×1080→960×540 | 0.04 | 0.01 | 4.0x | 2.07 | 0.56 | 0.19 | 2.7x |
-| resize (u8) | nearest | 3840×2160→1920×1080 | 0.12 | 0.03 | 4.0x | 6.03 | 2.67 | 0.67 | 1.8x |
-| warp_affine (30° rot, f32) | bilinear | 1920×1080 | 0.52 | 0.06 | 8.7x | 4.45 | 2.52 | 2.11 | 0.9x |
-| warp_affine (30° rot, f32) | bilinear | 3840×2160 | 2.11 | 0.25 | 8.4x | 19.61 | 10.94 | 12.75 | 0.8x |
-| warp_affine (30° rot, u8) | bilinear | 1920×1080 | 0.55 | 0.05 | 11.0x | 2.28 | 0.57 | 0.71 | 1.7x |
-| warp_affine (30° rot, u8) | bilinear | 3840×2160 | 2.21 | 0.19 | 11.6x | 9.56 | 2.78 | 2.21 | 1.8x |
-| warp_perspective (30° rot, f32) | bilinear | 1920×1080 | 0.50 | 0.07 | 7.1x | 13.78 | 2.59 | 2.12 | 2.9x |
-| warp_perspective (30° rot, f32) | bilinear | 3840×2160 | 2.05 | 0.26 | 7.9x | 50.39 | 10.86 | 12.56 | 2.1x |
-| warp_perspective (30° rot, u8) | bilinear | 1920×1080 | 0.60 | 0.07 | 8.6x | 1.82 | 0.56 | 0.58 | 1.5x |
-| warp_perspective (30° rot, u8) | bilinear | 3840×2160 | 2.43 | 0.25 | 9.7x | 8.03 | 2.44 | 2.09 | 1.7x |
-| remap (f32) | bilinear | 1920×1080 | 0.39 | 0.09 | 4.3x | 12.88 | 2.44 | 2.10 | 2.8x |
-| remap (f32) | bilinear | 3840×2160 | 1.58 | 0.32 | 4.9x | 50.15 | 10.69 | 12.70 | 2.1x |
-| gaussian_blur (5x5, f32) |  | 1920×1080 | 0.59 | 0.13 | 4.5x | 42.09 | 2.47 | 1.98 | 9.2x |
-| gaussian_blur (3x3, u8) |  | 1920×1080 | 0.26 | 0.04 | 6.5x | 0.44 | 0.57 | 0.56 | 0.4x |
-| box_blur (3x3, u8) |  | 1920×1080 | 0.28 | 0.04 | 7.0x | 6.28 | 0.57 | 0.56 | 5.4x |
-| sobel (3x3, f32) |  | 1920×1080 | 1.60 | 0.34 | 4.7x | 106.46 | 2.46 | 1.98 | 22.3x |
-| laplacian (3x3, u8) |  | 1920×1080 | 0.10 | 0.02 | 5.0x | 1.59 | 0.25 | 0.42 | 2.3x |
-| integral (u8) |  | 1920×1080 | 1.24 | 1.19 | 1.0x | 3.08 | 0.34 | 1.30 | 1.1x |
-| gaussian_blur (5x5, f32) |  | 3840×2160 | 2.46 | 0.48 | 5.1x | 230.99 | 10.52 | 12.53 | 9.8x |
-| gaussian_blur (3x3, u8) |  | 3840×2160 | 1.01 | 0.14 | 7.2x | 1.64 | 2.69 | 2.02 | 0.3x |
-| box_blur (3x3, u8) |  | 3840×2160 | 1.07 | 0.14 | 7.6x | 23.31 | 2.63 | 1.99 | 4.9x |
-| sobel (3x3, f32) |  | 3840×2160 | 6.42 | 1.30 | 4.9x | 413.50 | 10.63 | 12.03 | 17.3x |
-| laplacian (3x3, u8) |  | 3840×2160 | 0.39 | 0.06 | 6.5x | 6.59 | 0.78 | 1.39 | 3.0x |
-| integral (u8) |  | 3840×2160 | 3.57 | 2.41 | 1.5x | 9.88 | 0.96 | 4.10 | 1.3x |
-| erode (3x3, u8) |  | 1920×1080 | 0.27 | 0.05 | 5.4x | 45.38 | 0.55 | 0.58 | 38.6x |
-| dilate (3x3, u8) |  | 1920×1080 | 0.27 | 0.04 | 6.8x | 32.89 | 0.56 | 0.58 | 27.8x |
-| erode (3x3, u8) |  | 3840×2160 | 0.93 | 0.13 | 7.2x | 138.34 | 2.58 | 2.01 | 29.3x |
-| dilate (3x3, u8) |  | 3840×2160 | 0.94 | 0.13 | 7.2x | 127.20 | 2.53 | 2.00 | 27.3x |
-| gray_from_rgb (f32) |  | 1920×1080 | 0.19 | 0.05 | 3.8x | 0.81 | 2.42 | 0.71 | 0.3x |
-| gray_from_rgb (f32) |  | 3840×2160 | 0.75 | 0.16 | 4.7x | 3.95 | 10.65 | 2.76 | 0.3x |
-| remap (u8) | bilinear | 1920×1080 | 0.23 | 0.04 | 5.8x | 2.93 | 0.56 | 0.63 | 2.4x |
-| remap (u8) | nearest | 1920×1080 | 0.21 | 0.04 | 5.2x | 2.93 | 0.57 | 0.64 | 2.3x |
-| remap (u8) | bilinear | 3840×2160 | 0.89 | 0.14 | 6.4x | 10.97 | 2.45 | 1.98 | 2.4x |
-| remap (u8) | nearest | 3840×2160 | 0.82 | 0.14 | 5.9x | 10.97 | 2.45 | 1.98 | 2.4x |
-| gray_from_rgb (u8) |  | 1920×1080 | 0.05 | 0.02 | 2.5x | 0.50 | 0.55 | 0.25 | 0.6x |
-| gray_from_rgb (u8) |  | 3840×2160 | 0.19 | 0.05 | 3.8x | 0.88 | 2.45 | 0.71 | 0.3x |
-| rgb_from_gray (u8) |  | 1920×1080 | 0.10 | 0.02 | 5.0x | 0.56 | 0.23 | 0.63 | 0.6x |
-| rgb_from_gray (u8) |  | 3840×2160 | 0.36 | 0.05 | 7.2x | 1.19 | 0.75 | 2.18 | 0.4x |
-| hsv_from_rgb (f32) |  | 1920×1080 | 0.30 | 0.07 | 4.3x | 2.29 | 2.62 | 2.02 | 0.5x |
-| hsv_from_rgb (f32) |  | 3840×2160 | 1.17 | 0.24 | 4.9x | 8.50 | 11.13 | 15.85 | 0.3x |
-| hls_from_rgb (f32) |  | 1920×1080 | 0.30 | 0.07 | 4.3x | 2.87 | 2.63 | 2.20 | 0.6x |
-| hls_from_rgb (f32) |  | 3840×2160 | 1.17 | 0.24 | 4.9x | 9.37 | 11.27 | 14.77 | 0.4x |
-| ycc_from_rgb (u8) |  | 1920×1080 | 0.08 | 0.02 | 4.0x | 1.30 | 0.57 | 0.62 | 1.1x |
-| ycc_from_rgb (u8) |  | 3840×2160 | 0.30 | 0.07 | 4.3x | 4.28 | 2.63 | 2.20 | 0.9x |
-| ycc_from_rgb (f32) |  | 1920×1080 | 0.30 | 0.07 | 4.3x | 1.83 | 2.52 | 2.13 | 0.4x |
-| ycc_from_rgb (f32) |  | 3840×2160 | 1.17 | 0.24 | 4.9x | 8.01 | 10.73 | 12.66 | 0.3x |
-| bgr_from_rgb (u8) |  | 1920×1080 | 0.08 | 0.02 | 4.0x | 0.75 | 0.57 | 0.65 | 0.6x |
-| bgr_from_rgb (u8) |  | 3840×2160 | 0.30 | 0.07 | 4.3x | 2.08 | 2.64 | 2.21 | 0.4x |
+| resize (f32) | bilinear | 1920×1080→960×540 | 12.05 | 0.18 | 0.5x | 6.95 | 0.04 | 1.8x | 4.5x |
+| resize (f32) | bilinear | 3840×2160→1920×1080 | 42.62 | 0.71 | 0.5x | 20.66 | 0.15 | 1.5x | 4.7x |
+| resize (f32) | nearest | 1920×1080→960×540 | 7.40 | 0.11 | 0.4x | 2.85 | 0.03 | 0.8x | 3.7x |
+| resize (f32) | nearest | 3840×2160→1920×1080 | 29.88 | 0.43 | 0.4x | 8.54 | 0.10 | 0.6x | 4.3x |
+| resize (f32) | bicubic | 1920×1080→960×540 | 29.05 | 0.24 | 1.4x | 29.24 | 0.05 | 8.4x | 4.8x |
+| resize (f32) | bicubic | 3840×2160→1920×1080 | 112.82 | 0.93 | 1.3x | 87.69 | 0.16 | 6.9x | 5.8x |
+| resize (f32) | lanczos | 1920×1080→960×540 | 11.13 | 0.40 | 0.5x | 5.25 | 0.30 | 1.3x | 1.3x |
+| resize (f32) | lanczos | 3840×2160→1920×1080 | 41.79 | 1.54 | 0.5x | 18.67 | 0.87 | 1.3x | 1.8x |
+| resize (u8) | bilinear | 1920×1080→960×540 | 11.27 | 0.07 | 2.1x | 5.27 | 0.02 | 6.7x | 3.5x |
+| resize (u8) | bilinear | 3840×2160→1920×1080 | 41.17 | 0.24 | 1.9x | 18.43 | 0.05 | 5.7x | 4.8x |
+| resize (u8) | nearest | 1920×1080→960×540 | 7.14 | 0.04 | 1.3x | 2.07 | 0.01 | 2.7x | 4.0x |
+| resize (u8) | nearest | 3840×2160→1920×1080 | 28.63 | 0.12 | 1.3x | 6.03 | 0.03 | 1.8x | 4.0x |
+| warp_affine (30° rot, f32) | bilinear | 1920×1080 | 27.24 | 0.52 | 0.8x | 4.45 | 0.06 | 0.9x | 8.7x |
+| warp_affine (30° rot, f32) | bilinear | 3840×2160 | 113.09 | 2.11 | 0.8x | 19.61 | 0.25 | 0.8x | 8.4x |
+| warp_affine (30° rot, u8) | bilinear | 1920×1080 | 7.74 | 0.55 | 0.9x | 2.28 | 0.05 | 1.7x | 11.0x |
+| warp_affine (30° rot, u8) | bilinear | 3840×2160 | 33.48 | 2.21 | 0.9x | 9.56 | 0.19 | 1.8x | 11.6x |
+| warp_perspective (30° rot, f32) | bilinear | 1920×1080 | 38.02 | 0.50 | 1.1x | 13.78 | 0.07 | 2.9x | 7.1x |
+| warp_perspective (30° rot, f32) | bilinear | 3840×2160 | 185.16 | 2.05 | 1.3x | 50.39 | 0.26 | 2.1x | 7.9x |
+| warp_perspective (30° rot, u8) | bilinear | 1920×1080 | 7.63 | 0.60 | 0.9x | 1.82 | 0.07 | 1.5x | 8.6x |
+| warp_perspective (30° rot, u8) | bilinear | 3840×2160 | 33.99 | 2.43 | 0.9x | 8.03 | 0.25 | 1.7x | 9.7x |
+| remap (f32) | bilinear | 1920×1080 | 24.32 | 0.39 | 0.7x | 12.88 | 0.09 | 2.8x | 4.3x |
+| remap (f32) | bilinear | 3840×2160 | 92.44 | 1.58 | 0.7x | 50.15 | 0.32 | 2.1x | 4.9x |
+| gaussian_blur (5x5, f32) |  | 1920×1080 | 50.60 | 0.59 | 1.5x | 42.09 | 0.13 | 9.2x | 4.5x |
+| gaussian_blur (3x3, u8) |  | 1920×1080 | 2.93 | 0.26 | 0.4x | 0.44 | 0.04 | 0.4x | 6.5x |
+| box_blur (3x3, u8) |  | 1920×1080 | 10.06 | 0.28 | 1.2x | 6.28 | 0.04 | 5.4x | 7.0x |
+| sobel (3x3, f32) |  | 1920×1080 | 125.51 | 1.60 | 3.6x | 106.46 | 0.34 | 22.3x | 4.7x |
+| laplacian (3x3, u8) |  | 1920×1080 | 2.52 | 0.10 | 0.6x | 1.59 | 0.02 | 2.3x | 5.0x |
+| integral (u8) |  | 1920×1080 | 8.19 | 1.23 | 1.0x | 3.08 | 1.19 | 1.1x | 1.0x |
+| gaussian_blur (5x5, f32) |  | 3840×2160 | 227.01 | 2.46 | 1.6x | 230.99 | 0.48 | 9.8x | 5.1x |
+| gaussian_blur (3x3, u8) |  | 3840×2160 | 13.81 | 1.01 | 0.4x | 1.64 | 0.14 | 0.3x | 7.2x |
+| box_blur (3x3, u8) |  | 3840×2160 | 36.41 | 1.07 | 1.1x | 23.31 | 0.14 | 4.9x | 7.6x |
+| sobel (3x3, f32) |  | 3840×2160 | 514.51 | 6.42 | 3.6x | 413.50 | 1.30 | 17.3x | 4.9x |
+| laplacian (3x3, u8) |  | 3840×2160 | 9.37 | 0.39 | 0.6x | 6.59 | 0.06 | 3.0x | 6.5x |
+| integral (u8) |  | 3840×2160 | 32.74 | 3.58 | 1.0x | 9.88 | 2.41 | 1.3x | 1.5x |
+| erode (3x3, u8) |  | 1920×1080 | 52.50 | 0.27 | 6.3x | 45.38 | 0.05 | 38.6x | 5.4x |
+| dilate (3x3, u8) |  | 1920×1080 | 51.04 | 0.27 | 6.1x | 32.89 | 0.04 | 27.8x | 6.8x |
+| erode (3x3, u8) |  | 3840×2160 | 230.54 | 0.94 | 5.8x | 138.34 | 0.13 | 29.3x | 7.2x |
+| dilate (3x3, u8) |  | 3840×2160 | 229.97 | 0.94 | 6.0x | 127.20 | 0.13 | 27.3x | 7.2x |
+| gray_from_rgb (f32) |  | 1920×1080 | 7.52 | 0.19 | 0.3x | 0.81 | 0.05 | 0.3x | 3.8x |
+| gray_from_rgb (f32) |  | 3840×2160 | 25.93 | 0.75 | 0.3x | 3.95 | 0.16 | 0.3x | 4.7x |
+| remap (u8) | bilinear | 1920×1080 | 8.40 | 0.23 | 0.9x | 2.93 | 0.04 | 2.4x | 5.8x |
+| remap (u8) | nearest | 1920×1080 | 8.40 | 0.22 | 0.9x | 2.93 | 0.04 | 2.3x | 5.5x |
+| remap (u8) | bilinear | 3840×2160 | 31.17 | 0.89 | 0.8x | 10.97 | 0.14 | 2.4x | 6.4x |
+| remap (u8) | nearest | 3840×2160 | 31.17 | 0.82 | 0.8x | 10.97 | 0.14 | 2.4x | 5.9x |
+| gray_from_rgb (u8) |  | 1920×1080 | 1.28 | 0.06 | 0.2x | 0.50 | 0.02 | 0.6x | 3.0x |
+| gray_from_rgb (u8) |  | 3840×2160 | 7.94 | 0.19 | 0.3x | 0.88 | 0.05 | 0.3x | 3.8x |
+| rgb_from_gray (u8) |  | 1920×1080 | 1.53 | 0.10 | 0.2x | 0.56 | 0.02 | 0.6x | 5.0x |
+| rgb_from_gray (u8) |  | 3840×2160 | 10.22 | 0.36 | 0.4x | 1.19 | 0.05 | 0.4x | 7.2x |
+| hsv_from_rgb (f32) |  | 1920×1080 | 13.62 | 0.30 | 0.4x | 2.29 | 0.07 | 0.5x | 4.3x |
+| hsv_from_rgb (f32) |  | 3840×2160 | 46.87 | 1.17 | 0.3x | 8.50 | 0.24 | 0.3x | 4.9x |
+| hls_from_rgb (f32) |  | 1920×1080 | 13.42 | 0.30 | 0.4x | 2.87 | 0.07 | 0.6x | 4.3x |
+| hls_from_rgb (f32) |  | 3840×2160 | 47.11 | 1.17 | 0.3x | 9.37 | 0.24 | 0.4x | 4.9x |
+| ycc_from_rgb (u8) |  | 1920×1080 | 3.98 | 0.08 | 0.4x | 1.30 | 0.02 | 1.1x | 4.0x |
+| ycc_from_rgb (u8) |  | 3840×2160 | 14.70 | 0.30 | 0.4x | 4.28 | 0.07 | 0.9x | 4.3x |
+| ycc_from_rgb (f32) |  | 1920×1080 | 13.33 | 0.30 | 0.4x | 1.83 | 0.07 | 0.4x | 4.3x |
+| ycc_from_rgb (f32) |  | 3840×2160 | 44.65 | 1.17 | 0.3x | 8.01 | 0.24 | 0.3x | 4.9x |
+| bgr_from_rgb (u8) |  | 1920×1080 | 3.62 | 0.08 | 0.4x | 0.75 | 0.02 | 0.6x | 4.0x |
+| bgr_from_rgb (u8) |  | 3840×2160 | 13.50 | 0.30 | 0.4x | 2.08 | 0.07 | 0.4x | 4.3x |
 
 ### The other three benchmarks on the same machine
 
