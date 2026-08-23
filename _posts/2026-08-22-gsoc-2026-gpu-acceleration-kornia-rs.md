@@ -351,6 +351,119 @@ as #1122 at a third of the size, once the parts that had been superseded upstrea
 were stripped out.
 
 
+## Appendix: the full sweep
+
+Everything above is a handful of rows chosen to make a point. This is the whole
+`bench_cuda_imgproc` sweep on the RTX 3090, all 58 operations, so the selection
+above can be checked against the rest.
+
+Reproduce it with:
+
+```sh
+git clone -b bench/all-gpu-work https://github.com/Incharajayaram/kornia-rs
+cd kornia-rs && cargo bench --bench bench_cuda_imgproc --features cuda
+```
+
+RTX 3090 (sm_86, 24 GB, driver 580.173.02, CUDA 12.8), commit `b887ffd`,
+30 warmup and 100 timed iterations, CUDA events, rotating source buffers.
+All times in milliseconds. The host is a virtualised Haswell vCPU, so treat the
+CPU column and the two speedup columns as optimistic; the H2D, kernel and D2H
+columns are hardware measurements and stand on their own.
+
+| Operation | Interp | Resolution | CPU | H2D | Kernel | D2H | Total GPU | Kernel | Round trip |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| resize (f32) | bilinear | 1920×1080→960×540 | 6.95 | 2.71 | 0.04 | 1.11 | 3.86 | 157.5x | 1.8x |
+| resize (f32) | bilinear | 3840×2160→1920×1080 | 20.66 | 11.36 | 0.15 | 2.20 | 13.71 | 137.0x | 1.5x |
+| resize (f32) | nearest | 1920×1080→960×540 | 2.85 | 2.67 | 0.03 | 0.71 | 3.41 | 97.9x | 0.8x |
+| resize (f32) | nearest | 3840×2160→1920×1080 | 8.54 | 11.29 | 0.10 | 2.01 | 13.39 | 89.7x | 0.6x |
+| resize (f32) | bicubic | 1920×1080→960×540 | 29.24 | 2.83 | 0.05 | 0.62 | 3.50 | 633.2x | 8.4x |
+| resize (f32) | bicubic | 3840×2160→1920×1080 | 87.69 | 10.61 | 0.16 | 2.01 | 12.77 | 559.4x | 6.9x |
+| resize (f32) | lanczos | 1920×1080→960×540 | 5.25 | 3.09 | 0.30 | 0.55 | 3.94 | 17.7x | 1.3x |
+| resize (f32) | lanczos | 3840×2160→1920×1080 | 18.67 | 11.50 | 0.87 | 2.16 | 14.53 | 21.5x | 1.3x |
+| resize (u8) | bilinear | 1920×1080→960×540 | 5.27 | 0.57 | 0.02 | 0.20 | 0.79 | 295.7x | 6.7x |
+| resize (u8) | bilinear | 3840×2160→1920×1080 | 18.43 | 2.52 | 0.05 | 0.67 | 3.24 | 398.9x | 5.7x |
+| resize (u8) | nearest | 1920×1080→960×540 | 2.07 | 0.56 | 0.01 | 0.19 | 0.75 | 169.4x | 2.7x |
+| resize (u8) | nearest | 3840×2160→1920×1080 | 6.03 | 2.67 | 0.03 | 0.67 | 3.37 | 200.2x | 1.8x |
+| warp_affine (30° rot, f32) | bilinear | 1920×1080 | 4.45 | 2.52 | 0.06 | 2.11 | 4.69 | 69.2x | 0.9x |
+| warp_affine (30° rot, f32) | bilinear | 3840×2160 | 19.61 | 10.94 | 0.25 | 12.75 | 23.94 | 78.2x | 0.8x |
+| warp_affine (30° rot, u8) | bilinear | 1920×1080 | 2.28 | 0.57 | 0.05 | 0.71 | 1.33 | 41.6x | 1.7x |
+| warp_affine (30° rot, u8) | bilinear | 3840×2160 | 9.56 | 2.78 | 0.19 | 2.21 | 5.17 | 51.4x | 1.8x |
+| warp_perspective (30° rot, f32) | bilinear | 1920×1080 | 13.78 | 2.59 | 0.07 | 2.12 | 4.78 | 211.8x | 2.9x |
+| warp_perspective (30° rot, f32) | bilinear | 3840×2160 | 50.39 | 10.86 | 0.26 | 12.56 | 23.68 | 193.5x | 2.1x |
+| warp_perspective (30° rot, u8) | bilinear | 1920×1080 | 1.82 | 0.56 | 0.07 | 0.58 | 1.21 | 26.4x | 1.5x |
+| warp_perspective (30° rot, u8) | bilinear | 3840×2160 | 8.03 | 2.44 | 0.25 | 2.09 | 4.77 | 32.7x | 1.7x |
+| remap (f32) | bilinear | 1920×1080 | 12.88 | 2.44 | 0.09 | 2.10 | 4.63 | 148.8x | 2.8x |
+| remap (f32) | bilinear | 3840×2160 | 50.15 | 10.69 | 0.32 | 12.70 | 23.71 | 157.2x | 2.1x |
+| gaussian_blur (5x5, f32) |  | 1920×1080 | 42.09 | 2.47 | 0.13 | 1.98 | 4.58 | 329.4x | 9.2x |
+| gaussian_blur (3x3, u8) |  | 1920×1080 | 0.44 | 0.57 | 0.04 | 0.56 | 1.17 | 10.2x | 0.4x |
+| box_blur (3x3, u8) |  | 1920×1080 | 6.28 | 0.57 | 0.04 | 0.56 | 1.17 | 140.9x | 5.4x |
+| sobel (3x3, f32) |  | 1920×1080 | 106.46 | 2.46 | 0.34 | 1.98 | 4.78 | 313.5x | 22.3x |
+| laplacian (3x3, u8) |  | 1920×1080 | 1.59 | 0.25 | 0.02 | 0.42 | 0.68 | 95.9x | 2.3x |
+| integral (u8) |  | 1920×1080 | 3.08 | 0.34 | 1.19 | 1.30 | 2.83 | 2.6x | 1.1x |
+| gaussian_blur (5x5, f32) |  | 3840×2160 | 230.99 | 10.52 | 0.48 | 12.53 | 23.53 | 483.6x | 9.8x |
+| gaussian_blur (3x3, u8) |  | 3840×2160 | 1.64 | 2.69 | 0.14 | 2.02 | 4.85 | 11.7x | 0.3x |
+| box_blur (3x3, u8) |  | 3840×2160 | 23.31 | 2.63 | 0.14 | 1.99 | 4.76 | 161.5x | 4.9x |
+| sobel (3x3, f32) |  | 3840×2160 | 413.50 | 10.63 | 1.30 | 12.03 | 23.96 | 317.1x | 17.3x |
+| laplacian (3x3, u8) |  | 3840×2160 | 6.59 | 0.78 | 0.06 | 1.39 | 2.22 | 116.0x | 3.0x |
+| integral (u8) |  | 3840×2160 | 9.88 | 0.96 | 2.41 | 4.10 | 7.46 | 4.1x | 1.3x |
+| erode (3x3, u8) |  | 1920×1080 | 45.38 | 0.55 | 0.05 | 0.58 | 1.18 | 968.8x | 38.6x |
+| dilate (3x3, u8) |  | 1920×1080 | 32.89 | 0.56 | 0.04 | 0.58 | 1.18 | 740.1x | 27.8x |
+| erode (3x3, u8) |  | 3840×2160 | 138.34 | 2.58 | 0.13 | 2.01 | 4.72 | 1095.8x | 29.3x |
+| dilate (3x3, u8) |  | 3840×2160 | 127.20 | 2.53 | 0.13 | 2.00 | 4.66 | 988.4x | 27.3x |
+| gray_from_rgb (f32) |  | 1920×1080 | 0.81 | 2.42 | 0.05 | 0.71 | 3.18 | 17.8x | 0.3x |
+| gray_from_rgb (f32) |  | 3840×2160 | 3.95 | 10.65 | 0.16 | 2.76 | 13.57 | 24.9x | 0.3x |
+| remap (u8) | bilinear | 1920×1080 | 2.93 | 0.56 | 0.04 | 0.63 | 1.23 | 69.5x | 2.4x |
+| remap (u8) | nearest | 1920×1080 | 2.93 | 0.57 | 0.04 | 0.64 | 1.25 | 70.6x | 2.3x |
+| remap (u8) | bilinear | 3840×2160 | 10.97 | 2.45 | 0.14 | 1.98 | 4.58 | 75.7x | 2.4x |
+| remap (u8) | nearest | 3840×2160 | 10.97 | 2.45 | 0.14 | 1.98 | 4.57 | 76.7x | 2.4x |
+| gray_from_rgb (u8) |  | 1920×1080 | 0.50 | 0.55 | 0.02 | 0.25 | 0.83 | 27.9x | 0.6x |
+| gray_from_rgb (u8) |  | 3840×2160 | 0.88 | 2.45 | 0.05 | 0.71 | 3.21 | 19.2x | 0.3x |
+| rgb_from_gray (u8) |  | 1920×1080 | 0.56 | 0.23 | 0.02 | 0.63 | 0.88 | 35.8x | 0.6x |
+| rgb_from_gray (u8) |  | 3840×2160 | 1.19 | 0.75 | 0.05 | 2.18 | 2.98 | 22.0x | 0.4x |
+| hsv_from_rgb (f32) |  | 1920×1080 | 2.29 | 2.62 | 0.07 | 2.02 | 4.70 | 34.4x | 0.5x |
+| hsv_from_rgb (f32) |  | 3840×2160 | 8.50 | 11.13 | 0.24 | 15.85 | 27.22 | 35.0x | 0.3x |
+| hls_from_rgb (f32) |  | 1920×1080 | 2.87 | 2.63 | 0.07 | 2.20 | 4.90 | 43.3x | 0.6x |
+| hls_from_rgb (f32) |  | 3840×2160 | 9.37 | 11.27 | 0.24 | 14.77 | 26.29 | 38.4x | 0.4x |
+| ycc_from_rgb (u8) |  | 1920×1080 | 1.30 | 0.57 | 0.02 | 0.62 | 1.21 | 58.7x | 1.1x |
+| ycc_from_rgb (u8) |  | 3840×2160 | 4.28 | 2.63 | 0.07 | 2.20 | 4.89 | 64.4x | 0.9x |
+| ycc_from_rgb (f32) |  | 1920×1080 | 1.83 | 2.52 | 0.07 | 2.13 | 4.72 | 27.2x | 0.4x |
+| ycc_from_rgb (f32) |  | 3840×2160 | 8.01 | 10.73 | 0.24 | 12.66 | 23.63 | 32.8x | 0.3x |
+| bgr_from_rgb (u8) |  | 1920×1080 | 0.75 | 0.57 | 0.02 | 0.65 | 1.24 | 33.0x | 0.6x |
+| bgr_from_rgb (u8) |  | 3840×2160 | 2.08 | 2.64 | 0.07 | 2.21 | 4.91 | 31.0x | 0.4x |
+
+### The other three benchmarks on the same machine
+
+**Unified memory, end-to-end `resize()` per frame.** Explicit copies against
+managed memory against write-combined pinned memory:
+
+| Size | Explicit | Unified | Pinned WC |
+| --- | ---: | ---: | ---: |
+| VGA 640x480 | 2.496 ms | 5.352 ms | 1.897 ms |
+| HD 1280x720 | 5.443 ms | 8.879 ms | 3.263 ms |
+| FHD 1920x1080 | 9.828 ms | 15.940 ms | 5.612 ms |
+| 4K 3840x2160 | 26.525 ms | 37.449 ms | 18.312 ms |
+
+Unified memory loses on this discrete card exactly as it does on the GTX 1650,
+which is the result the Jetson comparison predicts. The column worth noticing is
+the third one: **write-combined pinned memory beats both**, by 1.3x to 1.8x,
+because the CPU writes stream out without polluting cache and the transfer is
+then a straight DMA. It is the option I would reach for first on a discrete card,
+and it is not the one I spent the most time on.
+
+**SIFT `detect_and_compute`,** unified against explicit: 0.35x at VGA, 0.42x at
+HD, 0.45x at FHD. Same direction, larger penalty, because SIFT allocates more
+managed buffers.
+
+**Tensor ops.** The elementwise round trips lose as expected (0.1x to 0.3x), but
+`reduce` wins: 3.7x at 1M elements, 3.6x at 10M, 3.4x at 100M. A reduction
+uploads a buffer and returns a scalar, so it pays H2D once and no D2H at all,
+which is the one shape where the transfer arithmetic works out on any card.
+
+The summation-accuracy probe returned bit-identical numbers on the 3090 and the
+GTX 1650: CPU 48614172786688, GPU 49982858067968, against a true value of
+50000000004999.8. Two different architectures, same two answers, which is what
+you would hope for from a deterministic reduction and a deterministic bug.
+
 ## Thanks
 
 To Edgar Riba and Christie Purackal for review consistently more careful than the code deserved, for
