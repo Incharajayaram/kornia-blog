@@ -102,24 +102,49 @@ broke on image sizes I hadn't tested.
 
 ## Results
 
-![]({{ site.baseurl }}/images/gsoc2026-gpu/benchmarks.png "Kernel times against OpenCV CUDA and PyTorch, and round-trip on two cards")
+![]({{ site.baseurl }}/images/gsoc2026-gpu/benchmarks.png "kornia against OpenCV 5 and PyTorch, round-trip on three machines, and VPI on the Jetson")
 
-GTX 1650, against OpenCV 4.12 CUDA and PyTorch 2.9. All three measured on the
-same card with the same loop: 50 warmup, 200 timed runs, one sync at the end.
+GTX 1650, against OpenCV 5.0.0 CUDA and PyTorch 2.9.1, all measured on the same
+card on the same day with the desktop idle.
 
-Resize 1920x1080 to 960x540, and warp-affine at 45 degrees, kernel time:
+Resize 1920x1080 to 960x540, and warp-affine at 30 degrees, kernel time:
 
-| Operation | kornia-rs | cv2 CUDA | PyTorch | vs cv2 | vs PyTorch |
+| Operation | kornia-rs | OpenCV 5 CUDA | PyTorch | vs OpenCV | vs PyTorch |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| resize nearest | 0.107 ms | 0.217 ms | 0.109 ms | **2.0x** | 1.0x |
-| resize bilinear | 0.178 ms | 0.291 ms | 0.182 ms | **1.6x** | 1.0x |
-| resize bicubic | 0.245 ms | 0.569 ms | 1.493 ms | **2.3x** | **6.1x** |
-| warp-affine | 0.592 ms | 0.763 ms | 3.177 ms | 1.3x | **5.4x** |
+| resize nearest | 0.14 ms | 0.22 ms | 0.68 ms | **1.6x** | **4.9x** |
+| resize bilinear | 0.22 ms | 0.28 ms | 0.19 ms | **1.3x** | 0.9x |
+| resize bicubic | 0.24 ms | 0.48 ms | 1.55 ms | **2.0x** | **6.5x** |
+| warp-affine | 0.53 ms | 0.65 ms | 3.13 ms | 1.2x | **5.9x** |
 
-We beat OpenCV CUDA on all of them, tie PyTorch on the cheap ones and pull ahead
-on the expensive ones. The PyTorch gap is biggest on warp because
+We beat OpenCV 5 CUDA on all of them. PyTorch is level on bilinear and well
+behind everywhere else, and the gap is biggest on warp because
 `F.affine_grid` plus `F.grid_sample` builds a whole coordinate grid tensor every
 call, and we build nothing.
+
+My mentor asked for this to cover more than OpenCV, which turned out to be a good
+push. Comparing against one library tells you whether you beat that library.
+Comparing against three tells you where you actually sit.
+
+### What about NVIDIA VPI?
+
+VPI is NVIDIA's own vision library, and it is the strongest thing in this space
+on Jetson hardware. It is not distributed for x86 through the CUDA repo, so I
+measured it on the Orin Nano, against the OpenCV 4.8 CPU build that ships there:
+
+| Operation, 1080p u8 | VPI 3.2.4 | OpenCV 4.8 CPU | VPI speedup |
+| --- | ---: | ---: | ---: |
+| resize bilinear | 0.76 ms | 0.64 ms | 0.8x |
+| warp-affine | 3.26 ms | 13.00 ms | **4.0x** |
+| gaussian 3x3 | 0.79 ms | 1.06 ms | 1.3x |
+| box blur 3x3 | 0.88 ms | 6.48 ms | **7.4x** |
+| dilate 3x3 | 0.98 ms | 2.20 ms | **2.2x** |
+
+VPI is fast where you would expect a fixed-function vision library to be fast.
+It is also narrow: **16 of the 46 operations in my sweep exist in VPI at all.**
+No cubic interpolation. No Laplacian. Filters want single-channel u8 rather than
+RGB, and morphology wants a 2D kernel array rather than a size. That is a
+reasonable trade for a library aimed at embedded pipelines, but it does mean VPI
+and kornia are not really substitutes for each other.
 
 Colour conversion hits 170 GB/s at 1080p, which is 89% of what the card can do.
 That's the number I like most, because it isn't a comparison with anyone. It just
@@ -286,11 +311,11 @@ Every pull request, in order:
 | [#1066](https://github.com/kornia/kornia-rs/pull/1066) | Post-merge review fixes on remap |
 | [#1068](https://github.com/kornia/kornia-rs/pull/1068) | u8 remap with fixed-point quantisation, byte-exact on CPU and CUDA |
 
-Four are still open at the time of writing:
+These four merged on 2026-08-24, just before I wrote this up:
 
 | PR | What it does |
 | --- | --- |
-| [#1115](https://github.com/kornia/kornia-rs/pull/1115) | Benchmarks for remap, colour conversion and the unified-memory path |
+| [#1115](https://github.com/kornia/kornia-rs/pull/1115) | Write-combined pinned allocator, plus benchmarks for remap, colour and unified memory |
 | [#1116](https://github.com/kornia/kornia-rs/pull/1116) | Laplacian and integral filters with GPU support |
 | [#1121](https://github.com/kornia/kornia-rs/pull/1121) | Two optimizations to the existing CUDA SIFT kernels: register-tiling the vertical blur, and warp-aggregating the descriptor histogram atomics so lanes hitting the same bin combine before the atomic |
 | [#1122](https://github.com/kornia/kornia-rs/pull/1122) | Element-wise and reduction tensor ops dispatched on `MemoryDomain`, with in-place variants |
