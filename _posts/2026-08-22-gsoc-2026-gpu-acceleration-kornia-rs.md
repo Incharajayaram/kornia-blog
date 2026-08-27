@@ -460,77 +460,102 @@ you would hope for from a reduction that behaves the same way twice, and a bug t
 
 ## What's next, and what you could pick up
 
-The backend works and it is fast, but it is a first pass and there is plenty
-left. Most of what follows is stuff I hit, measured, and then ran out of summer
-on. If you want to work on kornia-rs and you like GPU work, any of these is a
-real task with a clear finish line, and several of them are small. I have tried
-to say what the actual difficulty is rather than making them all sound easy.
+The backend works and it is fast, but it is a first pass. Below is what I would
+do next, split into things that are ready to start now and things that are more
+of a project. Several of the first group are ones I hit, measured, and then ran
+out of summer on.
+
+### Ready to pick up
 
 **Finish INTER_AREA, and work out why it did nothing.** Area averaging for
 integer downscale ratios should be cheaper than bilinear: you average four
 pixels instead of computing interpolation weights. Mine measured no better and I
 never found out why. The branch is still sitting unopened. Someone should
-profile it properly rather than trusting my read. Good first GPU task because
-the kernel itself is easy and the interesting part is the measurement.
+profile it rather than trusting my read.
 
 **Shared memory tiling, but on the right kernels.** I tried it on bilinear
 resize and it was up to 7x slower, because bilinear reads four source pixels per
 output pixel no matter the scale and there is nothing to reuse. That reasoning
 does not apply to INTER_AREA, gaussian blur or box blur, which do consume every
-pixel in the tile they load. Tiling is probably still a win there. It just
-needed testing on a kernel whose access pattern justifies it.
+pixel in the tile they load. Do not read my result as tiling being a dead end. I
+tested it on the one kernel where it could not help.
+
+**Fix `reduce` on the CPU.** This is a real bug. Summing 10 million floats that
+interleave 1e7 and 1e-3, the CPU returns 48614172786688 and the GPU returns
+49982858067968, against a true value of about 50000000004999. The GPU is right
+and the **CPU** is off by 2.8 percent, because it accumulates sequentially in
+f32. Pairwise or Kahan summation on the host fixes it. The existing parity tests
+use gentle input and a tolerance, so they pass and never see this.
 
 **A parallel CPU path for the tensor ops.** `kornia-tensor` already depends on
 `rayon` and `ops.rs` does not use it. The elementwise and reduction ops are
-plain scalar loops. That also means every GPU-versus-CPU ratio I published for
-those ops is measured against a single-threaded baseline, so a parallel CPU path
-would both speed up real code and make the comparisons honest.
-
-**Fix `reduce` on the CPU.** This one is a genuine bug and it is my favourite
-thing I found. Summing 10 million floats that interleave 1e7 and 1e-3, the CPU
-returns 48614172786688 and the GPU returns 49982858067968, against a true value
-of about 50000000004999. The GPU is right and the **CPU** is the inaccurate one,
-by 2.8 percent, because it accumulates sequentially in f32. Pairwise or Kahan
-summation on the host would fix it. The existing parity tests use gentle input
-and a tolerance, so they pass and never see this.
+plain scalar loops, which also means every GPU-versus-CPU ratio I published for
+those ops is against a single-threaded baseline.
 
 **An ORB benchmark.** ORB lives in `crates/kornia-imgproc/src/features/orb` and
-has no benchmark at all. SIFT has two. Following the shape of `bench_cuda_sift`
-and comparing against `cv2.ORB_create()` would close an obvious gap, and it is a
-good way to learn the benchmark harness without touching kernel code.
+has no benchmark at all, while SIFT has two. Follow the shape of
+`bench_cuda_sift` and compare against `cv2.ORB_create()`.
 
-**Fix `examples/bench_vpi3.py`.** It calls `rescale((w, h), vpi.Interp.LINEAR,
-vpi.Border.ZERO)` positionally, but on VPI 3.2.4 those arguments are keyword
-only, so it raises `TypeError` and never runs. Small fix, and I only found it
-because I copied its style and hit the same wall.
+### Bigger projects
 
-**Widen the VPI comparison.** My ecosystem sweep covers the VPI operations I
-wired up, but VPI also exposes `bilateral_filter`, `median_filter`,
-`convolution` and `recursive_gaussian_filter`, which I did not get to. Adding
-them to `bench_ecosystem_sweep.py` would make the VPI column considerably less
-sparse.
+**Overlap the transfers instead of paying for them.** This is the one I would
+pick. The central result of this post is that on a discrete card the round trip
+costs more than the kernel saves, and right now every call uploads, computes and
+downloads in sequence on one stream. A pipeline that double buffers, uploading
+frame N+1 while frame N is still computing, hides most of that cost. The stream
+and event plumbing already exists in `cuda/dispatch.rs` for cross stream
+fencing, so the machinery is there. Nobody has built the async pipeline on top
+of it. If it works it changes the conclusion of the benchmark rather than just
+improving a number in it.
 
-**Test on more architectures.** Everything here is sm_75, sm_86 and sm_87. The
-gain from a bigger GPU turned out to vary from 1.0x to 11.6x depending on
-whether the kernel is bandwidth bound or has a serial dependency chain, so more
-data points would be genuinely informative. Blackwell needs CUDA 12.8 or newer
-for NVRTC to emit sm_120.
+**A fusion pass.** Every operation today is its own launch, reading the image
+from DRAM and writing it back. A real pipeline does resize then normalise then
+colour convert, which is three round trips through memory for work that could be
+one. There is already a hand written fused resize plus normalise in
+`resize/fused.rs`, and it is meaningfully faster than the two passes. The
+interesting project is generalising that: some way to describe a chain of
+element wise and sampling operations and generate one kernel for it, instead of
+hand writing every useful combination.
 
-**Python bindings for unified memory on Jetson.** `zeros_cuda_unified` and
-`to_cuda_unified` exist in Rust. The Python side does not expose them yet. Worth
-doing once someone works out why unified memory is slower than explicit copies
-in the end to end SIFT path even on the Jetson, which I never resolved.
+**CUDA graphs.** Several of these kernels run in well under a millisecond, which
+means launch overhead is a real fraction of the cost in a per frame loop. CUDA
+graphs let you capture a sequence of launches once and replay it, paying the
+setup cost a single time. It fits this codebase unusually well because the
+kernel cache already assumes the same operations run over and over.
 
-**Let users register their own kernels.** This one is Edgar's idea rather than
-mine, and it is the most interesting thing on the list. The `OnceLock` cache
-does not care where the CUDA C string came from, so a `CudaKernel::compile_user`
-API would let people drop their own kernels into the same per process cache and
-get the same arch detection and caching for free, without forking kornia-rs.
+**A second vendor backend, and the hard question under it.** Everything here is
+CUDA. AMD through HIP, or something portable through Vulkan or wgpu, would open
+the library up. But this is exactly where my summer started and I would want
+whoever tries it to know why I moved off CubeCL: a portable layer could not
+expose `__ldg` or the L1 configuration, and those two things were worth six
+times the throughput. `MemoryDomain` already generalises past CUDA, so the
+storage side is ready. The real design question is how to add a second vendor
+without giving back the vendor specific performance, and I do not think anyone
+has a clean answer to that.
 
-If you pick one of these up, the benchmark suite is the thing to lean on. Run it
-before you start so you have a baseline on your own machine, and run it again
-after. Two of the three optimizations I was most confident about turned out to
-be slower, and the only reason I know that is that I measured them.
+**Zero copy interop with PyTorch.** `kornia-tensor` already has DLPack support
+and `from_foreign_cudaslice` for wrapping memory it does not own. Finishing that
+into a proper round trip, so a torch tensor and a kornia image can share the same
+device buffer with no copy at all, is worth more than any kernel optimisation on
+this list, because it deletes the transfer rather than speeding it up. The most
+common real pipeline is preprocess in kornia then infer in torch, and today that
+crosses PCIe twice for no reason.
+
+**fp16 and tensor cores.** Everything is f32 or u8. Half precision would roughly
+halve the bandwidth for the memory bound kernels, which is most of them, and
+plenty of downstream models want fp16 input anyway. The colour conversion kernel
+is already at 89 percent of what the card can do in f32, so the only way past
+that is to move fewer bytes.
+
+**More kernels.** Optical flow is CPU only today, in
+`optical_flow_pyr_lk.rs`, and pyramidal Lucas-Kanade parallelises well. Stereo
+disparity, template matching and Hough transforms are all missing and all have
+obvious GPU shapes.
+
+If you do pick something up, lean on the benchmark suite. Run it before you
+start so you have a baseline on your own machine, and run it again after. Two of
+the three optimizations I was most confident about turned out to be slower, and
+the only reason I know that is that I measured them.
 
 ## Thanks
 
