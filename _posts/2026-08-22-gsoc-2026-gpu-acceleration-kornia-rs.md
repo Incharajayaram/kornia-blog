@@ -458,6 +458,80 @@ GTX 1650: CPU 48614172786688, GPU 49982858067968, against a true value of
 50000000004999.8. Two different architectures, same two answers, which is what
 you would hope for from a reduction that behaves the same way twice, and a bug that does too.
 
+## What's next, and what you could pick up
+
+The backend works and it is fast, but it is a first pass and there is plenty
+left. Most of what follows is stuff I hit, measured, and then ran out of summer
+on. If you want to work on kornia-rs and you like GPU work, any of these is a
+real task with a clear finish line, and several of them are small. I have tried
+to say what the actual difficulty is rather than making them all sound easy.
+
+**Finish INTER_AREA, and work out why it did nothing.** Area averaging for
+integer downscale ratios should be cheaper than bilinear: you average four
+pixels instead of computing interpolation weights. Mine measured no better and I
+never found out why. The branch is still sitting unopened. Someone should
+profile it properly rather than trusting my read. Good first GPU task because
+the kernel itself is easy and the interesting part is the measurement.
+
+**Shared memory tiling, but on the right kernels.** I tried it on bilinear
+resize and it was up to 7x slower, because bilinear reads four source pixels per
+output pixel no matter the scale and there is nothing to reuse. That reasoning
+does not apply to INTER_AREA, gaussian blur or box blur, which do consume every
+pixel in the tile they load. Tiling is probably still a win there. It just
+needed testing on a kernel whose access pattern justifies it.
+
+**A parallel CPU path for the tensor ops.** `kornia-tensor` already depends on
+`rayon` and `ops.rs` does not use it. The elementwise and reduction ops are
+plain scalar loops. That also means every GPU-versus-CPU ratio I published for
+those ops is measured against a single-threaded baseline, so a parallel CPU path
+would both speed up real code and make the comparisons honest.
+
+**Fix `reduce` on the CPU.** This one is a genuine bug and it is my favourite
+thing I found. Summing 10 million floats that interleave 1e7 and 1e-3, the CPU
+returns 48614172786688 and the GPU returns 49982858067968, against a true value
+of about 50000000004999. The GPU is right and the **CPU** is the inaccurate one,
+by 2.8 percent, because it accumulates sequentially in f32. Pairwise or Kahan
+summation on the host would fix it. The existing parity tests use gentle input
+and a tolerance, so they pass and never see this.
+
+**An ORB benchmark.** ORB lives in `crates/kornia-imgproc/src/features/orb` and
+has no benchmark at all. SIFT has two. Following the shape of `bench_cuda_sift`
+and comparing against `cv2.ORB_create()` would close an obvious gap, and it is a
+good way to learn the benchmark harness without touching kernel code.
+
+**Fix `examples/bench_vpi3.py`.** It calls `rescale((w, h), vpi.Interp.LINEAR,
+vpi.Border.ZERO)` positionally, but on VPI 3.2.4 those arguments are keyword
+only, so it raises `TypeError` and never runs. Small fix, and I only found it
+because I copied its style and hit the same wall.
+
+**Widen the VPI comparison.** My ecosystem sweep covers the VPI operations I
+wired up, but VPI also exposes `bilateral_filter`, `median_filter`,
+`convolution` and `recursive_gaussian_filter`, which I did not get to. Adding
+them to `bench_ecosystem_sweep.py` would make the VPI column considerably less
+sparse.
+
+**Test on more architectures.** Everything here is sm_75, sm_86 and sm_87. The
+gain from a bigger GPU turned out to vary from 1.0x to 11.6x depending on
+whether the kernel is bandwidth bound or has a serial dependency chain, so more
+data points would be genuinely informative. Blackwell needs CUDA 12.8 or newer
+for NVRTC to emit sm_120.
+
+**Python bindings for unified memory on Jetson.** `zeros_cuda_unified` and
+`to_cuda_unified` exist in Rust. The Python side does not expose them yet. Worth
+doing once someone works out why unified memory is slower than explicit copies
+in the end to end SIFT path even on the Jetson, which I never resolved.
+
+**Let users register their own kernels.** This one is Edgar's idea rather than
+mine, and it is the most interesting thing on the list. The `OnceLock` cache
+does not care where the CUDA C string came from, so a `CudaKernel::compile_user`
+API would let people drop their own kernels into the same per process cache and
+get the same arch detection and caching for free, without forking kornia-rs.
+
+If you pick one of these up, the benchmark suite is the thing to lean on. Run it
+before you start so you have a baseline on your own machine, and run it again
+after. Two of the three optimizations I was most confident about turned out to
+be slower, and the only reason I know that is that I measured them.
+
 ## Thanks
 
 To Edgar Riba and Christie Purackal for review consistently more careful than the code deserved, for
